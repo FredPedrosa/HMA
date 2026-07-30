@@ -1,0 +1,994 @@
+---
+title: "A Hierarquia Acústica do Afeto: convergência Estrutural Entre Inteligência Artificial e Percepção Humana na Música"
+author: "Frederico Pedrosa"
+date: "`r format(Sys.Date(), '%Y-%m-%d')`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+    latex_engine: xelatex  
+    highlight: tango
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    code_folding: hide
+    theme: cosmo
+    highlight: tango
+header-includes:
+  - \usepackage{placeins} 
+---
+
+
+```{r import}
+if(!require(pacman)) install.packages("pacman")
+pacman::p_load(dplyr, tidyr, ggplot2, ggrepel, readxl, ggpubr, performance,
+               EGAnet, lme4, sjPlot, psych, seminr, boot, stringr,tibble,
+               gridExtra, ggpubr, ggeffects, rstatix)
+```
+
+
+# CARREGAMENTO E PREPARAÇÃO DOS DADOS
+
+```{r data, message=FALSE, warning=FALSE}
+# --- 1.1 Dados Humanos---
+raw_data <- read_excel("~/PIBIT2025/Circumplex/BasesDados/Marilia/RawData/Raw_Data.xlsx")
+
+# Limpeza e Transformação para Long Format
+stimuli_ids <- sprintf("%03d", 1:116)
+names(raw_data)[27:142] <- paste0("Emotion_St_", stimuli_ids)
+names(raw_data)[144:259] <- paste0("Congruence_St_", stimuli_ids)
+names(raw_data)[267:382] <- paste0("Arousal_St_", stimuli_ids)
+names(raw_data)[384:499] <- paste0("Valence_St_", stimuli_ids)
+
+# Remover colunas vazias
+raw_data <- raw_data[, -c(26, 143, 266, 383)]
+
+# Pivotar (Transformar em Longo)
+data_long <- raw_data %>%
+  select(Participants, starts_with(c("Emotion_", "Congruence_", "Arousal_", "Valence_"))) %>%
+  pivot_longer(
+    cols = -Participants,
+    names_to = c(".value", "Stimulus_ID"),
+    names_pattern = "(.*)_St_(\\d+)"
+  ) %>%
+  mutate(Stimulus_ID = as.numeric(Stimulus_ID)) %>%
+  # Adicionar Emoção Pretendida (Gabarito)
+  mutate(Intended_Emotion = case_when(
+    Stimulus_ID <= 29 ~ "Happiness",
+    Stimulus_ID <= 58 ~ "Fear/Anger",
+    Stimulus_ID <= 87 ~ "Serenity",
+    TRUE ~ "Sadness"
+  ))
+
+# Lista dos 38 Estímulos Validados
+ids_38 <- c(4, 33, 45, 61, 64, 66, 71, 81, 86, 110,  # AL
+            21, 27, 43, 51, 57, 65, 67, 73, 82, 101, # MR
+            39, 56, 62, 69, 77, 80, 97, 109,         # SE
+            25, 42, 44, 50, 54, 76, 79, 83, 95, 106) # TR
+
+# --- 1.2 Dados da IA (MERT) ---
+# Carregar Embeddings (Ajuste caminho)
+mert_raw <- read.csv("~/PIBIT2025/Circumplex/BasesDados/Marilia/artigo/embeddings_mert_38_musicas.csv", row.names = 1)
+mert_data <- as.data.frame(t(mert_raw)) # Transpor: Linhas=Músicas
+
+# Renomear Músicas para bater com IDs
+# Ex: "Alegria - Estímulo 4" -> "AL_4"
+clean_names <- colnames(mert_data) # Pegar nomes originais
+clean_names <- gsub("Medo Raiva- Estímulo ", "MR_", clean_names)
+clean_names <- gsub("Medo Raiva - Estímulo ", "MR_", clean_names) # ajuste para espaços extras
+clean_names <- gsub("Alegria - Estímulo ", "AL_", clean_names)
+clean_names <- gsub("Serenidade - Estímulo ", "SE_", clean_names)
+clean_names <- gsub("Tristeza - Estímulo ", "TR_", clean_names)
+clean_names <- gsub(".mp3", "", clean_names)
+colnames(mert_data) <- clean_names
+
+# --- 1.3 Dados Âncora (para PLS-SEM) ---
+ancora_raw <- read.csv("~/PIBIT2025/Circumplex/BasesDados/Marilia/artigo/embeddings_mert_ancora.csv", row.names = 1)
+ancora_t <- as.data.frame(t(ancora_raw))
+colnames(ancora_t) <- c("Ancora_1", "Ancora_2", "Ancora_3", "Ancora_4")
+
+# Unir IA + Âncora para PLS
+dados_ia_pls <- cbind(mert_data, ancora_t)
+
+```
+
+## Visualização dos dados brutos em quadrantes
+
+```{r plot1}
+# --- 1. Preparar os Dados Agregados ---
+
+# Calcular a média de Valência e Arousal para CADA MÚSICA 
+humanos_por_musica <- data_long %>%
+  filter(Stimulus_ID %in% ids_38) %>%
+  group_by(Stimulus_ID, Intended_Emotion) %>%
+  summarise(
+    Mean_Valence = mean(Valence, na.rm = TRUE),
+    Mean_Arousal = mean(Arousal, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Segundo: Calcular os CENTRÓIDES (Média das músicas por Categoria)
+humanos_centroides <- humanos_por_musica %>%
+  group_by(Intended_Emotion) %>%
+  summarise(
+    Centroid_Val = mean(Mean_Valence),
+    Centroid_Aro = mean(Mean_Arousal),
+    SD_Val = sd(Mean_Valence), # Desvio padrão (opcional, para ver a dispersão)
+    SD_Aro = sd(Mean_Arousal)
+  )
+
+# Juntar para poder desenhar as linhas (teias) no gráfico
+plot_data_humanos <- left_join(humanos_por_musica, humanos_centroides, by = "Intended_Emotion")
+
+# --- 2. Visualização do Espaço Afetivo Humano ---
+
+ggplot(plot_data_humanos) +
+  # Linhas de referência (Centro da escala SAM é 5, assumindo escala 1-9)
+  # Se sua escala for -4 a +4, mude para 0. Se for 1 a 9, o centro é 5.
+  geom_vline(xintercept = 5, linetype = "dashed", color = "gray70") +
+  geom_hline(yintercept = 5, linetype = "dashed", color = "gray70") +
+  
+  # Teias (ligando cada música ao seu centróide)
+  geom_segment(aes(x = Mean_Valence, y = Mean_Arousal,
+                   xend = Centroid_Val, yend = Centroid_Aro,
+                   color = Intended_Emotion), alpha = 0.3) +
+  
+  # Pontos das Músicas Individuais (menores)
+  geom_point(aes(x = Mean_Valence, y = Mean_Arousal, color = Intended_Emotion),
+             size = 3, alpha = 0.6) +
+  
+  # Pontos dos Centróides (maiores e com borda)
+  geom_point(data = humanos_centroides, 
+             aes(x = Centroid_Val, y = Centroid_Aro, fill = Intended_Emotion),
+             size = 6, shape = 21, color = "black", stroke = 1.5) +
+  
+  # Rótulos (Opcional: IDs das músicas)
+  geom_text_repel(aes(x = Mean_Valence, y = Mean_Arousal, label = Stimulus_ID, color = Intended_Emotion),
+                  size = 3, max.overlaps = 20) +
+  
+  # Cores (Mantendo a paleta do paper)
+  scale_color_manual(values = c("Fear/Anger" = "#D55E00", 
+                                "Happiness" = "#E69F00", 
+                                "Sadness" = "#56B4E9", 
+                                "Serenity" = "#009E73")) +
+  scale_fill_manual(values = c("Fear/Anger" = "#D55E00", 
+                               "Happiness" = "#E69F00", 
+                               "Sadness" = "#56B4E9", 
+                               "Serenity" = "#009E73")) +
+  
+  # Ajuste de Escala (SAM vai de 1 a 9)
+  scale_x_continuous(limits = c(1, 9), breaks = 1:9) +
+  scale_y_continuous(limits = c(1, 9), breaks = 1:9) +
+  
+  # Títulos
+  labs(
+    title = "O Espaço Afetivo Percebido (Humanos)",
+    subtitle = "Médias de Valência e Arousal (SAM) para os 38 estímulos e seus Centróides",
+    x = "Valência Percebida (1 = Negativo, 9 = Positivo)",
+    y = "Arousal Percebido (1 = Calmo, 9 = Agitado)",
+    color = "Emoção Pretendida",
+    fill = "Emoção Pretendida"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(panel.grid.minor = element_blank())
+```
+
+## Tentativa por MDS
+
+```{r MDS}
+# 1. Preparar os dados (Médias por música)
+humanos_mds_data <- data_long %>%
+  filter(Stimulus_ID %in% ids_38) %>%
+  group_by(Stimulus_ID, Intended_Emotion) %>%
+  summarise(
+    Val = mean(Valence, na.rm = TRUE),
+    Aro = mean(Arousal, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# 2. Calcular Matriz de Distância
+# "O quão distante a música A está da música B na mente dos participantes?"
+dist_matrix <- dist(humanos_mds_data[, c("Val", "Aro")])
+
+# 3. Rodar MDS (Multidimensional Scaling)
+fit_mds <- cmdscale(dist_matrix, eig = TRUE, k = 2)
+df_mds <- data.frame(
+  Dim1 = fit_mds$points[, 1],
+  Dim2 = fit_mds$points[, 2],
+  Stimulus_ID = humanos_mds_data$Stimulus_ID,
+  Emoção = humanos_mds_data$Intended_Emotion
+)
+
+# 4. Plotar o MDS
+ggplot(df_mds, aes(x = Dim1, y = Dim2, color = Emoção)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray70") +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray70") +
+  
+  geom_point(size = 5, alpha = 0.8) +
+  geom_text_repel(aes(label = Stimulus_ID), size = 3.5, max.overlaps = 20) +
+  
+  scale_color_manual(values = c("Fear/Anger" = "#D55E00", 
+                                "Happiness" = "#E69F00", 
+                                "Sadness" = "#56B4E9", 
+                                "Serenity" = "#009E73")) +
+  
+  labs(
+    title = "Espaço Afetivo Latente (MDS)",
+    subtitle = "A estrutura relativa da percepção humana (Removendo viés de escala)",
+    x = "Dimensão 1 (Provavelmente Valência Invertida)",
+    y = "Dimensão 2 (Provavelmente Arousal)"
+  ) +
+  theme_minimal()
+
+```
+
+### Sóciodemográficos 
+
+```{r}
+# 2. Análise de Sexo (Frequência e Porcentagem)
+sexo_tabela <- table(raw_data$Sex)
+print(sexo_tabela)
+prop.table(sexo_tabela)
+
+# 3. Descritivas por Grupo (Média, DP, Mediana, Skew, etc.)
+# Idade
+describeBy(raw_data$Age, group = raw_data$Group)
+
+# Escolaridade (se for categórica, o ideal é table; se for ordinal, describeBy)
+describeBy(raw_data$Education, group = raw_data$Group)
+
+# Horas de Estudo Musical (Atenção às crases devido aos espaços no nome da coluna)
+describeBy(raw_data$`Hours of musical study`, group = raw_data$Group)
+
+# 4. Indicadores Clínicos (BAI e BDI) - Descritivas
+describeBy(raw_data$BAI, group = raw_data$Group)
+describeBy(raw_data$BDI, group = raw_data$Group)
+
+# 5. Testes de Comparação (Wilcoxon - Não Paramétrico)
+# Testando Ansiedade (BAI)
+wilcox_bai <- wilcox.test(BAI ~ Group, data = raw_data, exact = FALSE)
+print(wilcox_bai)
+
+# Testando Depressão (BDI)
+wilcox_bdi <- wilcox.test(BDI ~ Group, data = raw_data, exact = FALSE)
+print(wilcox_bdi)
+
+# 6. Tamanho do Efeito (r de Cohen para Wilcoxon)
+# Essencial para reportar o p=0.041 do BAI
+eff_bai <- wilcox_effsize(raw_data, BAI ~ Group)
+print(eff_bai)
+
+eff_bdi <- wilcox_effsize(raw_data, BDI ~ Group)
+print(eff_bdi)
+
+```
+
+# ANÁLISE 1: ESTRUTURA LATENTE DO MERT 
+
+## Análise Paralela de Hoen
+
+```{r AP}
+# Análise Paralela dos Embeddings
+resultado_paralela <- fa.parallel(mert_data, fa = "both", n.iter = 100, 
+                                  main = "Análise Paralela de Horn (MERT Embeddings)",
+                                  plot = F)
+
+# Exibir os valores numéricos
+#print(resultado_paralela)
+```
+
+## Análise Exploratória de Grafos
+
+```{r EGA_ia,warning=FALSE,message=FALSE}
+# EGA dos Embeddings médios
+EGA(mert_data)
+boot_IA <- bootEGA(mert_data, seed = 123)
+
+#png("Figura_2.png", width = 3000, height = 1600, res = 300)
+
+# Gera o gráfico (o EGAnet usa ggplot internamente)
+#plot(boot_IA, 
+#     node.size = 6, 
+#     label.size = 3)
+
+# Fecha e salva o arquivo
+#dev.off()
+```
+
+## PCA
+
+```{r tellegen}
+pca_ia <- principal(mert_data, nfactors = 3, rotate = "none")
+print("--- IA: Variância Explicada (PC1 = Intensidade, PC2 = Valência, PC3 = Ativação) ---")
+print(pca_ia$Vaccounted[2,])
+
+
+pca_ia <- prcomp(mert_data, scale. = TRUE)
+pca_ia$rotation[1:38] # primeiro Componente todos loadings positivos
+
+# Gráfico do Espaço Latente (A Hierarquia)
+df_pca_residuo <- data.frame(
+  Coord_PC2 = pca_ia$rotation[,2],
+  Coord_PC3 = pca_ia$rotation[,3],
+  Nome = rownames(pca_ia$rotation),
+  Categoria = substr(rownames(pca_ia$rotation), 1, 2)
+)
+
+ggplot(df_pca_residuo, aes(x = Coord_PC2, y = Coord_PC3, color = Categoria)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray80") +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray80") +
+  geom_point(size = 4, alpha = 0.8) +
+  geom_text_repel(aes(label = Nome), size = 3.5, max.overlaps = 30) +
+  scale_color_manual(values = c("AL" = "#E69F00", "MR" = "#D55E00", 
+                                "SE" = "#009E73", "TR" = "#56B4E9")) +
+  labs(
+    title = "O 'Circumplexo Residual' da IA (MERT)",
+    subtitle = "Espaço qualitativo após remover a Intensidade (PC1)",
+    x = "PC2 (Potencial Valência)",
+    y = "PC3 (Potencial Ativação)",
+    color = "Emoção"
+  ) +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+
+```
+
+### Rotacionar 45 graus para verificar o circumplexo
+
+```{r Russell}
+
+# Ângulo de rotação (ajuste conforme necessário, comecei com 45 graus)
+angulo <- 45 * (pi / 180) 
+
+df_pca_residuo$PC2_rot <- df_pca_residuo$Coord_PC2 * cos(angulo) - df_pca_residuo$Coord_PC3 * sin(angulo)
+df_pca_residuo$PC3_rot <- df_pca_residuo$Coord_PC2 * sin(angulo) + df_pca_residuo$Coord_PC3 * cos(angulo)
+
+# Plot rotacionado
+ggplot(df_pca_residuo, aes(x = PC2_rot, y = PC3_rot, color = Categoria)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  geom_point(size = 4) +
+  geom_text_repel(aes(label = Nome)) +
+  scale_color_manual(values = c("AL"="#E69F00", "MR"="#D55E00", "SE"="#009E73", "TR"="#56B4E9")) +
+  labs(title = "O Circumplexo da IA Rotacionado", x = "Valência (Estimada)", y = "Ativação (Estimada)") +
+  theme_minimal()
+
+```
+
+### Além de rotacionado, estimando os centróides
+
+```{r centroid}
+
+# 1. Calcular os Centróides (Média de X e Y por Categoria)
+centroides <- df_pca_residuo %>%
+  group_by(Categoria) %>%
+  summarise(
+    PC2_cent = mean(PC2_rot),
+    PC3_cent = mean(PC3_rot)
+  )
+
+# 2. Gerar o gráfico com os Centros de Gravidade
+ggplot() +
+  # Linhas de referência
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray80") +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray80") +
+  
+  # Desenha "teias" ligando os pontos ao centro (opcional, mas fica lindo)
+  geom_segment(data = df_pca_residuo %>% left_join(centroides, by="Categoria"),
+               aes(x = PC2_rot, y = PC3_rot, xend = PC2_cent, yend = PC3_cent, color = Categoria),
+               alpha = 0.3) +
+  
+  # Pontos das músicas individuais
+  geom_point(data = df_pca_residuo, aes(x = PC2_rot, y = PC3_rot, color = Categoria), 
+             size = 3, alpha = 0.6) +
+  
+  # OS CENTRÓIDES (Pontos maiores e com borda)
+  geom_point(data = centroides, aes(x = PC2_cent, y = PC3_cent, fill = Categoria), 
+             size = 6, shape = 21, color = "black", stroke = 1.5) +
+  
+  # Rótulos dos estímulos
+  geom_text_repel(data = df_pca_residuo, aes(x = PC2_rot, y = PC3_rot, label = Nome, color = Categoria),
+                  size = 3) +
+  
+  # Estética e Cores
+  scale_color_manual(values = c("AL"="#E69F00", "MR"="#D55E00", "SE"="#009E73", "TR"="#56B4E9")) +
+  scale_fill_manual(values = c("AL"="#E69F00", "MR"="#D55E00", "SE"="#009E73", "TR"="#56B4E9")) +
+  labs(
+    title = "Centros de Gravidade das Emoções na IA",
+    subtitle = "Representação do 'voto médio' do MERT para cada categoria",
+    x = "Valência (Estimada)",
+    y = "Ativação (Estimada)"
+  ) +
+  theme_minimal()
+
+```
+
+# ANÁLISE 2: ESTRUTURA LATENTE HUMANA (A PERCEPÇÃO)
+
+## Análise Paralela com os Escores de Valência e Arousal
+
+```{r PA_hum}
+
+# 1. Preparar Matriz Wide Completa (76 colunas)
+human_wide_total <- data_long %>%
+  filter(Stimulus_ID %in% ids_38) %>%
+  # Criar uma coluna única para Identificador e Atributo
+  pivot_longer(cols = c(Arousal, Valence), names_to = "Attribute", values_to = "Score") %>%
+  mutate(Var_Name = paste0("St", Stimulus_ID, "_", Attribute)) %>%
+  select(Participants, Var_Name, Score) %>%
+  pivot_wider(names_from = Var_Name, values_from = Score) %>%
+  na.omit()
+
+# 2. Análise Paralela de Horn (Quantas dimensões existem no espaço total?)
+pa_total <- fa.parallel(human_wide_total[-1], fa = "both", n.iter = 100,
+                        main = "", plot = F)
+
+```
+
+## PCA dados humanos
+
+```{r}
+# 4. PCA Hierárquico (O teste da Intensidade como Fator Geral)
+pca_hum <- principal(human_wide_total[-1], nfactors = 5, rotate = "none")
+pca_hum$loadings
+
+# 5. Os loadings de Valência e Arousal são ambos positivos no PC1?
+# Vamos criar um dataframe para visualizar isso
+loadings_total <- as.data.frame(unclass(pca_hum$loadings[,1, drop=FALSE]))
+colnames(loadings_total) <- "PC1_Loading"
+loadings_total$Variable <- rownames(loadings_total)
+
+# Separar nome da música e atributo
+loadings_total <- loadings_total %>%
+  separate(Variable, into = c("ID", "Atributo"), sep = "_")
+
+# Ver a média de carga por atributo
+loadings_total %>%
+  group_by(Atributo) %>%
+  summarise(Media_Carga_no_Fator_Geral = mean(PC1_Loading))
+```
+
+## EGA refinando por estabilidade
+
+```{r EGA_hum,warning=FALSE,message=FALSE}
+current_data_hum <- human_wide_total[-1]
+
+# Passo 1: Unique Variable Analysis (UVA) não identificou itens redundantes
+(uva_results_hum <- UVA(data = current_data_hum, verbose = FALSE))
+
+
+# Passo 2: Bootstrap EGA para calcular a estabilidade dos itens
+boot_refine_hum <- bootEGA(
+  data = current_data_hum, 
+  iter = 500, 
+  type = "parametric", 
+  model = "glasso", 
+  seed = 123
+)
+
+# Passo 3: Extração dos índices de estabilidade de nó
+item_stability_hum <- boot_refine_hum$stability$item.stability$item.stability$empirical.dimensions
+
+# Definição do limiar de estabilidade (Threshold padrão de 0.75)
+threshold <- 0.75 
+
+# Identificação de itens estáveis e instáveis
+stable_items_hum <- names(item_stability_hum[item_stability_hum >= threshold])
+unstable_items_hum <- names(item_stability_hum[item_stability_hum < threshold])
+
+# Passo 4: Relatório de Refinamento
+cat("\n>>> RESULTADOS DO REFINAMENTO <<<\n")
+cat("Itens Estáveis (>= 0.75):", length(stable_items_hum), "\n")
+cat("Itens Instáveis (< 0.75):", length(unstable_items_hum), "\n")
+
+if (length(unstable_items_hum) > 0) {
+  cat("\nEstímulos indicados para exclusão por instabilidade estrutural:\n")
+  print(unstable_items_hum)
+}
+
+# Passo 5: Criação do dataset refinado para análise final
+if (length(stable_items_hum) > 0) {
+  human_refined_data <- current_data_hum[, stable_items_hum, drop = FALSE]
+  cat("\nDimensões do dataset refinado (Participantes x Estímulos Estáveis):\n")
+  print(dim(human_refined_data))
+  
+  # Calcular a estrutura final com os itens estáveis
+  ega_final_hum <- bootEGA(human_refined_data, model = "glasso", seed = 123)
+} else {
+  stop("Nenhum item atingiu o limiar de estabilidade na Iteração 1.")
+}
+
+#png("Figura_4.png", width = 3200, height = 2100, res = 300)
+
+# Gera o gráfico com os parâmetros de rede
+#plot(ega_final_hum, 
+#     node.size = 5, 
+#     label.size = 2.8)
+
+# Fecha e salva o arquivo
+#dev.off()
+
+
+```
+
+### Identificação da composição das comunidades
+
+```{r comunidades}
+# 1. Extrair a alocação de cada item
+membership <- ega_final_hum$EGA$wc
+
+# 2. Criar o dataframe corrigindo o Regex para os novos nomes
+df_comunidades <- data.frame(
+  Item = names(membership),
+  Comunidade = as.vector(membership)
+) %>%
+  # Extrair apenas o número (ID) e o Atributo (Valence/Arousal)
+  mutate(
+    Stimulus_ID = as.numeric(stringr::str_extract(Item, "\\d+")),
+    Atributo = stringr::str_extract(Item, "Valence|Arousal")
+  )
+
+# 3. Juntar com o gabarito de categorias
+# Criando o gabarito oficial com os 38 estímulos validados no artigo
+gabarito_categorias <- data.frame(
+  Stimulus_ID = c(
+    4, 33, 45, 61, 64, 66, 71, 81, 86, 110,  # IDs de Alegria (AL)
+    21, 27, 43, 51, 57, 65, 67, 73, 82, 101, # IDs de Medo/Raiva (MR)
+    39, 56, 62, 69, 77, 80, 97, 109,         # IDs de Serenidade (SE)
+    25, 42, 44, 50, 54, 76, 79, 83, 95, 106  # IDs de Tristeza (TR)
+  )
+) %>%
+  mutate(Intended_Emotion = case_when(
+    Stimulus_ID %in% c(4, 33, 45, 61, 64, 66, 71, 81, 86, 110) ~ "Alegria",
+    Stimulus_ID %in% c(21, 27, 43, 51, 57, 65, 67, 73, 82, 101) ~ "Medo/Raiva",
+    Stimulus_ID %in% c(39, 56, 62, 69, 77, 80, 97, 109) ~ "Serenidade",
+    Stimulus_ID %in% c(25, 42, 44, 50, 54, 76, 79, 83, 95, 106) ~ "Tristeza",
+    TRUE ~ "Outro"
+  ))
+
+
+resultado_final <- df_comunidades %>%
+  left_join(gabarito_categorias, by = "Stimulus_ID")
+
+# --- RELATÓRIO DE COMPOSIÇÃO ---
+resumo_comunidades <- resultado_final %>%
+  group_by(Comunidade, Intended_Emotion, Atributo) %>%
+  tally() %>%
+  arrange(Comunidade, Atributo)
+
+print(resumo_comunidades)
+
+# 4. Visualização da "Arquitetura do Afeto"
+ggplot(resultado_final, aes(x = factor(Comunidade), fill = Intended_Emotion)) +
+  geom_bar(position = "stack") +
+  facet_wrap(~Atributo) +
+  labs(title = "As 4 Facetas do Afeto Humano",
+       subtitle = "Separação funcional de Valência e Arousal por comunidades de rede",
+       x = "Comunidade EGA", y = "Quantidade de Itens",
+       fill = "Emoção Pretendida") +
+  theme_minimal()
+
+
+# 1. Calcular a porcentagem de cada emoção DENTRO de cada comunidade
+df_porcentagens <- resultado_final %>%
+  group_by(Comunidade) %>%
+  mutate(Total_na_Comunidade = n()) %>% # Total de itens (nós) na comunidade
+  group_by(Comunidade, Intended_Emotion) %>%
+  summarise(
+    Quantidade = n(),
+    Porcentagem = (n() / first(Total_na_Comunidade)) * 100,
+    .groups = "drop"
+  )
+
+# 2. Exibir o resultado formatado
+print(df_porcentagens %>% arrange(Comunidade, desc(Porcentagem)))
+
+```
+
+# ANÁLISE 3: MODELOS PLS-SEM (MECANISMO DA INTENSIDADE)
+
+## Modelo PLS-SEM da Intensidade Acústica
+
+```{r pls_ia}
+
+nomes_musicas <- colnames(dados_ia_pls)
+
+# 1. Separar os itens pelos 4 quadrantes específicos
+itens_al <- grep("AL_", nomes_musicas, value = TRUE)
+itens_se <- grep("SE_", nomes_musicas, value = TRUE)
+itens_mr <- grep("MR_", nomes_musicas, value = TRUE)
+itens_tr <- grep("TR_", nomes_musicas, value = TRUE)
+
+# 2. Estágio 1: Definir os 4 Módulos de IA
+mm1_ia_4cat <- constructs(
+  composite("IA_Alegria",    itens_al, mode_A), 
+  composite("IA_Serenidade", itens_se, mode_A),
+  composite("IA_Raiva", itens_mr, mode_A),
+  composite("IA_Tristeza",   itens_tr, mode_A)
+)
+
+# Relacionamento temporário para extrair scores
+rs1_ia_4cat <- relationships(
+  paths(from = c("IA_Alegria", "IA_Serenidade", "IA_Tristeza"), to = "IA_Raiva")
+)
+
+pls1_ia_4cat <- estimate_pls(dados_ia_pls, mm1_ia_4cat, rs1_ia_4cat)
+summary(pls1_ia_4cat)
+#plot(pls1_ia_4cat)
+```
+
+```{r}
+
+scores_ia_4cat <- as.data.frame(pls1_ia_4cat$construct_scores)
+
+# 3. Estágio 2: Modelo Hierárquico de Intensidade (HMA) da IA
+dados_ia_final_4cat <- cbind(scores_ia_4cat, ancora_t)
+
+mm2_ia_4cat <- constructs(
+  composite("Intensidade_IA", 
+            c("IA_Alegria", "IA_Serenidade", "IA_Raiva", "IA_Tristeza"), 
+            mode_A),
+  composite("Âncora", colnames(ancora_t), mode_B)
+)
+
+rs2_ia_4cat <- relationships(
+  paths(from = "Intensidade_IA", to = "Âncora")
+)
+
+pls2_ia_4cat <- estimate_pls(dados_ia_final_4cat, mm2_ia_4cat, rs2_ia_4cat)
+summary(pls2_ia_4cat)
+plot(pls2_ia_4cat)
+
+# 4. Bootstrap para verificar a significância dos pesos
+boot_ia_4cat <- bootstrap_model(pls2_ia_4cat, nboot = 1000)
+summary(boot_ia_4cat)
+```
+
+## Modelo Humano Hierárquico (PLS)
+
+```{r pls_hum}
+
+# 0. Itens selecionados pelo bootEGA
+itens_c1 <- resultado_final %>% filter(Comunidade == 1) %>% pull(Item)
+itens_c2 <- resultado_final %>% filter(Comunidade == 2) %>% pull(Item)
+itens_c3 <- resultado_final %>% filter(Comunidade == 3) %>% pull(Item)
+itens_c4 <- resultado_final %>% filter(Comunidade == 4) %>% pull(Item)
+
+# 1. Garantir que a Acurácia esteja no mesmo dataframe
+acc_hum <- data_long %>% 
+  filter(Stimulus_ID %in% ids_38) %>% # Filtra apenas os 38 estímulos validados
+  group_by(Participants) %>% 
+  summarise(
+    # Calcula a média da coluna Congruence (0 ou 1) para cada pessoa
+    Acc = mean(as.numeric(Congruence), na.rm = TRUE) 
+  )
+
+human_final_data <- human_wide_total %>%
+  left_join(acc_hum, by = "Participants")
+
+# 2. Estágio 1: Definir os 4 Módulos + Acurácia como âncora
+mm1_hum <- constructs(
+  composite("Alta_Ativação", itens_c1, mode_A), 
+  composite("Desprazer",   itens_c2, mode_A), 
+  composite("Baixa_Ativação", itens_c3, mode_A), 
+  composite("Prazer",    itens_c4, mode_A),
+  composite("Acurácia",     single_item("Acc")) # Âncora para extrair escores
+)
+
+# 3. Relacionamentos do Estágio 1 (Todos apontam para a Acurácia)
+rs1_hum <- relationships(
+  paths(from = c("Alta_Ativação", "Desprazer", "Baixa_Ativação", "Prazer"), 
+        to = "Acurácia")
+)
+
+# Estimar o modelo de primeiro estágio
+pls1_hum <- estimate_pls(human_final_data, mm1_hum, rs1_hum)
+summary(pls1_hum)
+
+```
+
+```{r pls_hum1}
+# Extrair os scores
+scores_hum <- as.data.frame(pls1_hum$construct_scores)
+
+# 3. Estágio 2: Formar a Intensidade Geral e prever Acurácia
+# Juntar os scores com a acurácia
+dados_hum_final <- cbind(scores_hum, Acc = human_final_data$Acc)
+
+mm2_hum <- constructs(
+  composite("Intensidade", 
+            c("Alta_Ativação", "Desprazer", "Baixa_Ativação", "Prazer"), 
+            mode_B),
+  composite("Acurácia", single_item("Acc"))
+)
+
+rs2_hum <- relationships(
+  paths(from = "Intensidade", to = "Acurácia")
+)
+
+pls2_hum <- estimate_pls(dados_hum_final, mm2_hum, rs2_hum)
+summary(pls2_hum)
+
+# 4. Bootstrap para verificar a Assimetria 
+boot_hum_final <- bootstrap_model(pls2_hum, nboot = 1000)
+summary(boot_hum_final)
+
+# 5. Resultados
+summary(pls2_hum)
+
+# Gráfico do Modelo Hierárquico Humano
+plot(pls2_hum)
+```
+
+# Relações entre as variáveis
+
+
+
+## Diferenças entre o vetor positivo e o negativo
+
+```{r }
+# --- PARTE 1: ORGANIZAR SCORES DA IA (38 Músicas) ---
+# Extraindo os scores do modelo de 4 quadrantes da IA
+# 1. Pegar os quadrantes do Estágio 1
+ia_quadrantes <- as.data.frame(pls1_ia_4cat$construct_scores)
+
+# 2. Pegar a Intensidade do Estágio 2
+ia_intensidade <- as.data.frame(pls2_ia_4cat$construct_scores)
+
+# 3. Fundir tudo em um único dataframe de 38 músicas
+scores_ia_4módulos <- ia_quadrantes %>%
+  mutate(
+    Intensidade_IA = ia_intensidade$Intensidade_IA,
+    RowName = rownames(ia_quadrantes),
+    Stimulus_ID = as.numeric(gsub("[^0-9]", "", RowName))
+  ) %>%
+  dplyr::select(Stimulus_ID, RowName, Intensidade_IA, 
+                IA_Alegria, IA_Serenidade, IA_Raiva, IA_Tristeza)
+
+
+# --- PARTE 2: ORGANIZAR SCORES HUMANOS (N = 200/216) ---
+# Assumindo que dados_hum_final já tem o Stimulus_ID e a Acurácia
+# 1. Unificar os escores dos dois estágios dos Humanos (N = 200)
+hum_st1 <- as.data.frame(pls1_hum$construct_scores)
+hum_st2 <- as.data.frame(pls2_hum$construct_scores)
+
+scores_hum_consolidado <- hum_st1 %>%
+  mutate(
+    Intensidade_Geral_Humana = hum_st2$Intensidade_Percebida,
+    Participants = human_final_data$Participants
+  )
+
+print(">>> Escores Humanos por Participante consolidados <<<")
+
+
+# 1. Gerar as médias humanas para cada uma das 38 músicas (do banco long)
+hum_media_por_musica <- data_long %>%
+  filter(Stimulus_ID %in% ids_38) %>%
+  group_by(Stimulus_ID) %>%
+  summarise(
+    Arousal_Humano = mean(Arousal, na.rm = TRUE),
+    Valence_Humano = mean(Valence, na.rm = TRUE)
+  )
+
+# 2. Unir com os escores da IA (que já estão no nível de música)
+df_correlacao_final <- inner_join(scores_ia_4módulos, hum_media_por_musica, by = "Stimulus_ID")
+
+# 3. Teste de Correlação de Spearman (IA vs. Humano)
+# Vamos ver como a Intensidade_IA se correlaciona com o Arousal e Valence humanos
+cor_spearman <- cor(df_correlacao_final %>% 
+                      dplyr::select(Intensidade_IA, IA_Alegria, IA_Serenidade, IA_Raiva, IA_Tristeza, 
+                                    Arousal_Humano, Valence_Humano), 
+                    method = "spearman")
+
+print(">>> MATRIZ DE CORRELAÇÃO IA vs. HUMANO (N=38) <<<")
+print(round(cor_spearman, 3))
+
+# 1. Preparar o banco de dados longo para o modelo misto
+df_misto_final <- data_long %>%
+  filter(Stimulus_ID %in% ids_38) %>%
+  # Trazer a Intensidade da IA para cada linha de julgamento humano
+  left_join(scores_ia_4módulos %>% dplyr::select(Stimulus_ID, Intensidade_IA), by = "Stimulus_ID")
+
+# 2. Rodar o Modelo Misto (LMM)
+# DV: Arousal Real (Humano) 
+# IV: Intensidade_IA (Física/MERT) multiplicada pela Categoria (Moderação)
+library(lmerTest)
+modelo_paradoxo_lmm <- lmer(Arousal ~ Intensidade_IA * Intended_Emotion + (1|Participants), 
+                            data = df_misto_final)
+
+# 3. RESULTADOS DO PARADOXO
+print(">>> RESULTADOS DO MODELO MISTO: O PARADOXO <<<")
+summary(modelo_paradoxo_lmm)
+
+# 4. CAPACIDADE EXPLICATIVA (R2)
+performance::r2(modelo_paradoxo_lmm)
+
+library(ggeffects)
+
+# Gerar as predições do modelo
+pred_paradoxo <- predict_response(modelo_paradoxo_lmm, 
+                                  terms = c("Intensidade_IA", "Intended_Emotion"))
+
+# Plotar com as cores padronizadas
+plot(pred_paradoxo) +
+  scale_color_manual(values = c("Fear/Anger" = "#D55E00", "Happiness" = "#E69F00", 
+                                "Sadness" = "#56B4E9", "Serenity" = "#009E73")) +
+  labs(
+    title = "O Paradoxo da Serenidade: Falha na Linearidade da IA",
+    x = "Intensidade Acústica Detectada pela IA (MERT PC1)",
+    y = "Intensidade Percebida pelo Humano (HMA)",
+    color = "Categoria"
+  ) +
+  theme_minimal()
+
+
+# 1. Pegar os escores latentes humanos e associar às músicas
+# Usaremos a lógica de pesos que o seu PLS-SEM validou
+# Intensidade Humana = (Arousal * 0,61) + (Valence * 0,32) [conforme sua PCA/PLS]
+
+df_song_level_human <- data_long %>%
+  filter(Stimulus_ID %in% ids_38) %>%
+  mutate(Intensidade_Humana_Latente = (Arousal * 0.61) + (Valence * 0.32)) %>%
+  group_by(Stimulus_ID) %>%
+  summarise(
+    Intensidade_Hum_Média = mean(Intensidade_Humana_Latente),
+    # Médias dos escores brutos para controle
+    Arousal_Médio = mean(Arousal),
+    Valence_Médio = mean(Valence)
+  )
+
+# 2. Unir com os escores latentes da IA
+df_confluencia_latente <- inner_join(scores_ia_4módulos, df_song_level_human, by = "Stimulus_ID")
+
+# Matriz de correlação de Spearman entre os "Cérebros"
+cor_latente <- cor(df_confluencia_latente %>% 
+                     dplyr::select(Intensidade_IA, IA_Alegria, IA_Serenidade, IA_Raiva, IA_Tristeza,
+                                   Intensidade_Hum_Média, Arousal_Médio, Valence_Médio), 
+                   method = "spearman")
+
+print(">>> CONFLUÊNCIA ENTRE VARIÁVEIS LATENTES (IA vs. HUMANO) <<<")
+print(round(cor_latente[1:5, 6:8], 3))
+
+
+
+# --- 1. EXTRAIR A INTENSIDADE LATENTE DA IA (PC1) ---
+# Usamos o componente unipolar massivo (87% de variância)
+df_ia_loadings <- data.frame(
+  Stimulus_ID = as.numeric(gsub("[^0-9]", "", rownames(pca_ia$rotation))),
+  IA_Magnitude_Latente = pca_ia$rotation[,1]
+)
+# Garantir sinal positivo para Magnitude
+if(mean(df_ia_loadings$IA_Magnitude_Latente) < 0) {
+  df_ia_loadings$IA_Magnitude_Latente <- df_ia_loadings$IA_Magnitude_Latente * -1
+}
+
+# --- 2. EXTRAIR A INTENSIDADE LATENTE HUMANA (PC1 das Médias) ---
+# Primeiro, criamos uma matriz de médias (N=38 músicas x 2 dimensões brutas)
+df_human_averages <- data_long %>%
+  filter(Stimulus_ID %in% ids_38) %>%
+  group_by(Stimulus_ID) %>%
+  summarise(M_Arousal = mean(Arousal), M_Valence = mean(Valence)) %>%
+  column_to_rownames("Stimulus_ID")
+
+# Rodamos um PCA de fator único sobre as médias humanas
+pca_hum_song <- principal(df_human_averages, nfactors = 1)
+
+df_hum_loadings <- data.frame(
+  Stimulus_ID = as.numeric(rownames(pca_hum_song$scores)),
+  Humano_Intensidade_Latente = as.numeric(pca_hum_song$scores[,1])
+)
+
+# --- 3. O CONFRONTO DE ESTIMATIVAS ---
+df_convergencia_final <- inner_join(df_ia_loadings, df_hum_loadings, by = "Stimulus_ID") %>%
+  left_join(gabarito_categorias, by = "Stimulus_ID")
+
+# Teste de Spearman (Invariante à escala bruta)
+cor_final <- cor.test(df_convergencia_final$IA_Magnitude_Latente, 
+                      df_convergencia_final$Humano_Intensidade_Latente, 
+                      method = "spearman")
+
+print(">>> CONVERGÊNCIA ESTRUTURAL: IA (PC1) vs. HUMANO (PC1) <<<")
+print(cor_final)
+
+
+
+# 1. Gerar as médias de Arousal e Valence por música (se ainda não tiver o objeto)
+hum_medias_sam <- data_long %>%
+  filter(Stimulus_ID %in% ids_38) %>%
+  group_by(Stimulus_ID) %>%
+  summarise(
+    Arousal_Humano = mean(Arousal, na.rm = TRUE),
+    Valence_Humano = mean(Valence, na.rm = TRUE)
+  )
+
+# 2. Unir com o seu dataframe de convergência
+df_convergencia_final <- df_convergencia_final %>%
+  left_join(hum_medias_sam, by = "Stimulus_ID")
+
+# 3. Calcular a Distância Euclidiana (Raiz da soma dos quadrados dos desvios do centro 5)
+df_convergencia_final <- df_convergencia_final %>%
+  mutate(
+    Distancia_Euclidiana_Humana = sqrt((Arousal_Humano - 5)^2 + (Valence_Humano - 5)^2)
+  )
+
+# 4. Rodar a regressão: A magnitude da IA explica a geometria humana?
+mod_euclidiano <- lm(Distancia_Euclidiana_Humana ~ IA_Magnitude_Latente, data = df_convergencia_final)
+
+# 5. RESULTADOS PARA O TEXTO
+summary(mod_euclidiano)
+cat("\n>>> R² do Modelo Geométrico (Distância):", round(summary(mod_euclidiano)$r.squared, 4))
+
+```
+# Russell vs HMA
+
+```{r}
+# ==============================================================================
+# O DUELO DEFINITIVO DE ACURÁCIA (RUSSELL vs MÁQUINA/HMA) - ESTUDO 1
+# ==============================================================================
+library(lme4)
+library(performance)
+library(dplyr)
+library(stringr)
+
+# 1. Extrair os 3 primeiros PCs da IA (MERT) a partir do PCA que você já rodou
+# Como você usou prcomp em uma matriz transposta, os scores das músicas estão em "rotation"
+df_pcs_ia <- data.frame(
+  # Extrai apenas os números (IDs) dos nomes das linhas (ex: "AL_4" vira 4)
+  Stimulus_ID = as.numeric(str_extract(rownames(pca_ia$rotation), "\\d+")),
+  PC1_MERT    = as.numeric(pca_ia$rotation[, 1]),
+  PC2_MERT    = as.numeric(pca_ia$rotation[, 2]),
+  PC3_MERT    = as.numeric(pca_ia$rotation[, 3])
+)
+
+# Garantir a unipolaridade do PC1 (se a média estiver invertida, consertamos)
+if(mean(df_pcs_ia$PC1_MERT) < 0) df_pcs_ia$PC1_MERT <- df_pcs_ia$PC1_MERT * -1
+
+# 2. Preparar os dados humanos (data_long já existe no seu environment)
+df_duelo_acc <- data_long %>%
+  filter(Stimulus_ID %in% ids_38) %>%
+  mutate(
+    # Garantir formato numérico
+    Valence = as.numeric(Valence),
+    Arousal = as.numeric(Arousal),
+    Congruence_Num = as.numeric(Congruence)
+  ) %>%
+  # Limpar possíveis NAs gerados
+  filter(!is.na(Valence), !is.na(Arousal), !is.na(Congruence_Num)) %>%
+  
+  # A lógica cirúrgica de Russell: Ipsatizar POR PARTICIPANTE
+  group_by(Participants) %>%
+  mutate(
+    # scale(center = T, scale = T) centraliza na média e divide pelo DP do indivíduo
+    Valence_Ipsat = scale(Valence, center = TRUE, scale = TRUE),
+    Arousal_Ipsat = scale(Arousal, center = TRUE, scale = TRUE)
+  ) %>%
+  ungroup() %>%
+  
+  # Cruzar com os dados da IA
+  left_join(df_pcs_ia, by = "Stimulus_ID")
+
+# 3. O DUELO DE MODELOS MISTOS BINOMIAIS (glmer)
+cat("\n>>> ESTIMANDO MODELO DE RUSSELL (Aguarde...) <<<\n")
+mod_russell_acc <- glmer(Congruence_Num ~ Valence_Ipsat + Arousal_Ipsat + (1 | Participants), 
+                         data = df_duelo_acc, 
+                         family = binomial,
+                         control = glmerControl(optimizer = "bobyqa"))
+
+cat("\n>>> ESTIMANDO MODELO HMA/MÁQUINA (Aguarde...) <<<\n")
+mod_hma_acc <- glmer(Congruence_Num ~ PC1_MERT + PC2_MERT + PC3_MERT + (1 | Participants), 
+                     data = df_duelo_acc, 
+                     family = binomial,
+                     control = glmerControl(optimizer = "bobyqa"))
+
+# 4. O VEREDITO DE PREDIÇÃO DE ACURÁCIA
+cat("\n>>> RESULTADO FINAL DO DUELO: RUSSELL vs HMA <<<\n")
+veredito_acc <- compare_performance(mod_russell_acc, mod_hma_acc, metrics = c("AIC", "R2", "RMSE"))
+print(veredito_acc)
+``` 
+
+```{r }
+sessionInfo()
+```
+
