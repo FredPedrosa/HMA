@@ -1,0 +1,234 @@
+---
+title: "Estudo 2: Generalização Computacional"
+author: "Frederico Pedrosa"
+date: "`r format(Sys.Date(), '%Y-%m-%d')`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+    latex_engine: xelatex  
+    highlight: tango
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    code_folding: hide
+    theme: cosmo
+    highlight: tango
+header-includes:
+  - \usepackage{placeins} 
+---
+# PCA dos embeddings CLAP e MERT
+
+```{r}
+library(tidyverse)
+library(psych)
+library(performance)
+
+# 1. Carregar os dados (Ajuste os caminhos se necessário)
+deam_clap <- read.csv("D:/DEAM/clap_deam_pronto_para_R.csv")
+deam_mert <- read.csv("D:/DEAM/mert_deam_pronto_para_R.csv")
+
+# 2. Preparar e Extrair Embeddings
+meta_deam <- deam_mert %>% dplyr::select(file_name, valence_real, arousal_real)
+
+# Matrizes invertidas para o PCA (Dimensões x Músicas)
+mert_inv <- as.data.frame(t(deam_mert %>% dplyr::select(starts_with("X"))))
+clap_inv <- as.data.frame(t(deam_clap %>% dplyr::select(starts_with("X"))))
+
+# 3. Extrair os Componentes Principais da IA (Saliência Acústica e Multimodal)
+pca_mert_deam <- principal(mert_inv, nfactors = 3, rotate = "none")
+pca_clap_deam <- principal(clap_inv, nfactors = 3, rotate = "none")
+
+loadings_mert <- unclass(pca_mert_deam$loadings)
+loadings_clap <- unclass(pca_clap_deam$loadings)
+
+# 4. Criar o Banco de Dados Consolidado do DEAM
+df_duelo_deam <- meta_deam %>%
+  mutate(
+    # Embeddings MERT
+    PC1_MERT = as.numeric(loadings_mert[,1]),
+    PC2_MERT = as.numeric(loadings_mert[,2]),
+    PC3_MERT = as.numeric(loadings_mert[,3]),
+    
+    # Embeddings CLAP
+    PC1_CLAP = as.numeric(loadings_clap[,1]),
+    PC2_CLAP = as.numeric(loadings_clap[,2]),
+    PC3_CLAP = as.numeric(loadings_clap[,3]),
+    
+    # Criar Categorias dos Quadrantes Afetivos no DEAM (Centro = 5 na escala de 1-9)
+    Category = case_when(
+      valence_real >= 5 & arousal_real >= 5 ~ "Happiness",
+      valence_real < 5 & arousal_real >= 5  ~ "Fear/Anger",
+      valence_real < 5 & arousal_real < 5   ~ "Sadness",
+      valence_real >= 5 & arousal_real < 5  ~ "Serenity"
+    ),
+    Category = as.factor(Category)
+  )
+
+# Ajuste de unipolaridade da Saliência (Magnitude deve ser positiva)
+if(mean(df_duelo_deam$PC1_MERT) < 0) df_duelo_deam$PC1_MERT <- df_duelo_deam$PC1_MERT * -1
+if(mean(df_duelo_deam$PC1_CLAP) < 0) df_duelo_deam$PC1_CLAP <- df_duelo_deam$PC1_CLAP * -1
+
+# Definir categoria de referência no modelo para ver o contraste (Serenity será o intercepto)
+df_duelo_deam$Category <- relevel(df_duelo_deam$Category, ref = "Serenity")
+
+```
+
+# O DUELO DE ARQUITETURAS (2D vs HMA)
+
+```{r}
+
+# --- MERT (Acústico) ---
+mod_russell_mert <- lm(valence_real ~ PC2_MERT + PC3_MERT, data = df_duelo_deam)
+mod_hma_mert     <- lm(valence_real ~ PC1_MERT + PC2_MERT + PC3_MERT, data = df_duelo_deam)
+
+cat("\n>>> DUELO DE PARSIMÔNIA: MERT (Acústico) <<<\n")
+print(compare_performance(mod_russell_mert, mod_hma_mert, metrics = c("AIC", "R2", "RMSE")))
+
+# --- CLAP (Multimodal) ---
+mod_russell_clap <- lm(valence_real ~ PC2_CLAP + PC3_CLAP, data = df_duelo_deam)
+mod_hma_clap     <- lm(valence_real ~ PC1_CLAP + PC2_CLAP + PC3_CLAP, data = df_duelo_deam)
+
+cat("\n>>> DUELO DE PARSIMÔNIA: CLAP (Multimodal) <<<\n")
+print(compare_performance(mod_russell_clap, mod_hma_clap, metrics = c("AIC", "R2", "RMSE")))
+
+```
+
+# PROVANDO O "PARADOXO DA SERENIDADE" EM LARGA ESCALA
+
+O modelo abaixo testa se o efeito do PC1 (Magnitude) sobre o Arousal Humano inverte ou muda drasticamente dependendo do quadrante (Interação).
+
+```{r}
+modelo_interacao_mert <- lm(arousal_real ~ PC1_MERT * Category, data = df_duelo_deam)
+
+cat("\n>>> TESTE DO PARADOXO DA SERENIDADE NO DEAM (MERT) <<<\n")
+summary(modelo_interacao_mert)
+
+
+modelo_interacao_clap <- lm(arousal_real ~ PC1_CLAP * Category, data = df_duelo_deam)
+
+cat("\n>>> TESTE DO PARADOXO DA SERENIDADE NO DEAM (CLAP) <<<\n")
+summary(modelo_interacao_clap)
+
+```
+# O EXPERIMENTO DE FALSICAÇÃO 
+
+## IPSATIZANDO A IA (MERT) ANTES DO PCA - MERT
+
+```{r}
+library(tidyverse)
+library(psych)
+library(performance)
+
+# 1. Pegar os embeddings puros do MERT (1802 músicas x 768 dimensões)
+emb_mert_puro <- deam_mert %>% dplyr::select(starts_with("X"))
+
+# 2. A IPSATIZAÇÃO DA MÁQUINA (Row-wise scaling)
+# Para cada música (linha), centralizamos as 768 dimensões na média 0 e DP 1.
+# Isso destrói a magnitude acústica global do vetor.
+emb_mert_ipsatizado <- t(apply(emb_mert_puro, 1, function(x) scale(x, center = TRUE, scale = TRUE)))
+
+# 3. Transpor (como você fez no original) para o PCA extrair o peso das músicas
+mert_inv_ipsat <- as.data.frame(t(emb_mert_ipsatizado))
+
+# 4. Rodar o PCA na IA "Lobotomizada"
+pca_mert_ipsatizado <- principal(mert_inv_ipsat, nfactors = 3, rotate = "none")
+
+# Vamos ver o que aconteceu com a variância do PC1 da máquina?
+cat("\n>>> Variância do PC1 na IA PURA vs IA IPSATIZADA <<<\n")
+cat("Pura (Magnitude mantida):", pca_mert_deam$Vaccounted[2,1], "\n")
+cat("Ipsatizada (Magnitude apagada):", pca_mert_ipsatizado$Vaccounted[2,1], "\n")
+
+# 5. Extrair os novos loadings (sem a magnitude bruta)
+loadings_ipsat <- unclass(pca_mert_ipsatizado$loadings)
+
+df_teste_falsificacao <- meta_deam %>%
+  mutate(
+    # Embeddings Ipsatizados
+    PC1_Ipsat = as.numeric(loadings_ipsat[,1]),
+    PC2_Ipsat = as.numeric(loadings_ipsat[,2]),
+    PC3_Ipsat = as.numeric(loadings_ipsat[,3]),
+    
+    # Resgatando os embeddings puros (para a batalha)
+    PC1_Puro = as.numeric(loadings_mert[,1]),
+    PC2_Puro = as.numeric(loadings_mert[,2]),
+    PC3_Puro = as.numeric(loadings_mert[,3])
+  )
+
+# 6. O DUELO DE PREDIÇÃO (O que acontece com o Arousal?)
+# Modelo A: A IA tentando prever a Ativação com os dados PUROS
+mod_arousal_puro <- lm(valence_real ~ PC1_Puro + PC2_Puro + PC3_Puro, data = df_teste_falsificacao)
+
+# Modelo B: A IA tentando prever a Ativação com os dados IPSATIZADOS
+mod_arousal_ipsat <- lm(valence_real ~ PC1_Ipsat + PC2_Ipsat, data = df_teste_falsificacao)
+
+# 7. O VEREDITO
+cat("\n>>> DUELO: IA PURA vs IA IPSATIZADA (Prevendo Arousal Humano) <<<\n")
+veredito_falsificacao <- compare_performance(mod_arousal_puro, mod_arousal_ipsat, metrics = c("AIC", "R2", "RMSE"))
+print(veredito_falsificacao)
+
+
+```
+
+## IPSATIZANDO A IA (MERT) ANTES DO PCA - CLAP
+
+```{r}
+library(tidyverse)
+library(psych)
+library(performance)
+
+# 1. Pegar os embeddings puros do CLAP (1802 músicas x 512 dimensões)
+emb_clap_puro <- deam_clap %>% dplyr::select(starts_with("X"))
+
+# 2. A IPSATIZAÇÃO DA MÁQUINA (Row-wise scaling)
+# Para cada música, centralizamos as 512 dimensões na média 0 e DP 1.
+# Isso cega o CLAP para a magnitude/volume global da música.
+emb_clap_ipsatizado <- t(apply(emb_clap_puro, 1, function(x) scale(x, center = TRUE, scale = TRUE)))
+
+# 3. Transpor para o PCA extrair o peso das músicas
+clap_inv_ipsat <- as.data.frame(t(emb_clap_ipsatizado))
+
+# 4. Rodar o PCA na IA "Lobotomizada"
+pca_clap_ipsatizado <- principal(clap_inv_ipsat, nfactors = 3, rotate = "none")
+
+# Vamos inspecionar o colapso da variância do PC1
+cat("\n>>> Variância do PC1 no CLAP PURO vs CLAP IPSATIZADO <<<\n")
+cat("Pura (Magnitude mantida):", pca_clap_deam$Vaccounted[2,1], "\n")
+cat("Ipsatizada (Magnitude apagada):", pca_clap_ipsatizado$Vaccounted[2,1], "\n")
+
+# 5. Extrair os novos loadings (sem a magnitude)
+loadings_clap_ipsat <- unclass(pca_clap_ipsatizado$loadings)
+
+df_teste_falsificacao_clap <- meta_deam %>%
+  mutate(
+    # Embeddings Ipsatizados limitados à Lente 2D de Russell
+    PC1_Ipsat = as.numeric(loadings_clap_ipsat[,1]),
+    PC2_Ipsat = as.numeric(loadings_clap_ipsat[,2]),
+    
+    # Resgatando os embeddings puros (HMA - 3 Dimensões)
+    PC1_Puro = as.numeric(loadings_clap[,1]),
+    PC2_Puro = as.numeric(loadings_clap[,2]),
+    PC3_Puro = as.numeric(loadings_clap[,3])
+  )
+
+# 6. O DUELO DE PREDIÇÃO (Prevendo Ativação Humana)
+# Modelo A: CLAP mantendo a Magnitude + Nuances (As 3 dimensões puras)
+mod_arousal_puro_clap <- lm(valence_real ~ PC1_Puro + PC2_Puro + PC3_Puro, data = df_teste_falsificacao_clap)
+
+# Modelo B: CLAP testado na lente 2D de Russell (Apenas as variações qualitativas)
+mod_arousal_ipsat_clap <- lm(valence_real ~ PC1_Ipsat + PC2_Ipsat, data = df_teste_falsificacao_clap)
+
+# 7. O VEREDITO
+cat("\n>>> DUELO: CLAP PURO vs CLAP IPSATIZADO (Lente de Russell) <<<\n")
+veredito_falsificacao_clap <- compare_performance(mod_arousal_puro_clap, mod_arousal_ipsat_clap, metrics = c("AIC", "R2", "RMSE"))
+print(veredito_falsificacao_clap)
+
+
+```
+
+
+```{r}
+sessionInfo()
+```
