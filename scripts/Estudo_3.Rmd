@@ -1,0 +1,1254 @@
+---
+title: "Estudo 3"
+subtitle: ""
+author: "Fredeico Pedrosa"
+date: "`r format(Sys.Date(), '%Y-%m-%d')`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+    latex_engine: xelatex  
+    highlight: tango
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    code_folding: show
+    theme: cosmo
+    highlight: tango
+header-includes:
+  - \usepackage{placeins} 
+---
+
+
+```{r setup,dev = "png",dpi = 300}
+library(tidyverse)
+library(readxl)
+library(psych)
+data <- read_excel("~/PIBIT2025/pesquisa2026a.xlsx")
+```
+
+# Processamento de dados
+
+## Sociodemográficos 
+
+```{r}
+
+data_clean <- data %>%
+  # 1. Renomeação padronizada
+  rename(
+    timestamp = 1, email = 2, interest = 3, consent = 4,
+    age = 5, sex = 6, gender_raw = 7, education_raw = 8, 
+    music_raw = 9, professional_field = 10
+  ) %>%
+  mutate(
+    # 2. Idade numérica
+    age = as.numeric(age),
+    
+    # 3. Gênero com Rigor (Inválidos/Orientação -> NA)
+    gender_identity = case_when(
+      gender_raw %in% c("Cisgênero", "Feminino", "Mulher") & sex == "Feminino" ~ "Cis_Woman",
+      gender_raw %in% c("Cisgênero", "Homem") & sex == "Masculino" ~ "Cis_Man",
+      gender_raw == "Não-binário" ~ "Non_Binary",
+      gender_raw == "Transgênero" ~ "Trans_Person",
+      TRUE ~ NA_character_
+    ),
+    
+    # 4. Escolaridade (Fator Ordenado)
+    education_level = factor(case_when(
+      education_raw %in% c("Ensino médio", "Técnico", "Superior incompleto") ~ "High_School",
+      education_raw %in% c("Graduação", "Graduanda em Musicoterapia") ~ "Undergraduate",
+      education_raw %in% c("Especialização", "Pós graduação", "Pós Graduação", "Pós graduado", "Pós Graduado", "Pós-graduação") ~ "Postgrad_Spec",
+      education_raw %in% c("Mestrado", "Mestrado em andamento") ~ "Master",
+      education_raw %in% c("Doutorado", "Pós-doutorado") ~ "Doctorate",
+      TRUE ~ "Other"
+    ), levels = c("High_School", "Undergraduate", "Postgrad_Spec", "Master", "Doctorate"), ordered = TRUE),
+    
+    # 5. Tempo de Estudo Musical (Com recuperação de dados)
+    music_training = factor(case_when(
+      professional_field %in% c("20 anos", "hobby") ~ "5yrs_plus", 
+      music_raw %in% c("Não estudei música", "Noção escolar") ~ "None",
+      music_raw %in% c("De 1 mês a 1 ano", "Faço aulas de percussão...") ~ "1mo_to_1yr",
+      music_raw == "De 1 ano a 5 anos" ~ "1yr_to_5yrs",
+      music_raw == "5 anos ou mais" | grepl("11 anos|23 anos|Muitos anos", music_raw) ~ "5yrs_plus",
+      TRUE ~ "None"
+    ), levels = c("None", "1mo_to_1yr", "1yr_to_5yrs", "5yrs_plus"), ordered = TRUE),
+
+    # 6. NOVO: Agrupamento de Setores Profissionais (Regex)
+    work_sector = case_when(
+      grepl("Música|Musica|Musicista|Músico|musico|Musicoterapeuta|Musicoterapia|Artes|Dança|Arte", professional_field, ignore.case = TRUE) ~ "Music_Arts",
+      grepl("Saúde|Saude|Psicolog|Médico|Enfermagem|Farmacêutica|Otorrino|Veterinário|Terapeuta", professional_field, ignore.case = TRUE) ~ "Health",
+      grepl("Educação|Educador|Professor|Pedagogia|Docência|Letras", professional_field, ignore.case = TRUE) ~ "Education",
+      grepl("Engenharia|Tecnologia|TI|Sistemas|Computação|Industrial|Mecânica|Soldador|Metalurgia|Mineração|Construção", professional_field, ignore.case = TRUE) ~ "STEM_Industry",
+      grepl("Administra|Advogado|Jurídica|Comercial|Vendedor|Contabilidade|Financeiro|Logística|Serviço público|Policial", professional_field, ignore.case = TRUE) ~ "Admin_Law_Business",
+      grepl("Estudante|Universitária|Aposentada|Desempregado|Do lar|Dona de casa", professional_field, ignore.case = TRUE) ~ "Student_Unemployed",
+      TRUE ~ "Others"
+    ),
+    work_sector = as.factor(work_sector)
+  )
+```
+
+## BFI
+
+```{r}
+# Renomear colunas 11 a 70
+bfi_names <- paste0("BFI", sprintf("%02d", 1:60))
+colnames(data_clean)[11:70] <- bfi_names
+
+likert_bfi <- c("Discordo totalmente"=1, "Discordo em parte"=2, "Nem concordo nem discordo"=3, "Concordo em parte"=4, "Concordo totalmente"=5)
+reversed_bfi <- c("BFI11", "BFI16", "BFI26", "BFI31", "BFI36", "BFI51", "BFI12", "BFI17", "BFI22", "BFI37", "BFI42", "BFI47", "BFI03", "BFI08", "BFI23", "BFI28", "BFI48", "BFI58", "BFI04", "BFI09", "BFI24", "BFI29", "BFI44", "BFI49", "BFI05", "BFI25", "BFI30", "BFI45", "BFI50", "BFI55")
+
+data_clean <- data_clean %>%
+  mutate(across(starts_with("BFI"), ~ as.numeric(likert_bfi[.x]))) %>%
+  mutate(across(all_of(reversed_bfi), ~ 6 - .x)) %>%
+  mutate( # Cálculo de Médias dos Fatores
+    bfi_E = rowMeans(select(., BFI01, BFI06, BFI11, BFI16, BFI21, BFI26, BFI31, BFI36, BFI41, BFI46, BFI51, BFI56), na.rm=T),
+    bfi_A = rowMeans(select(., BFI02, BFI07, BFI12, BFI17, BFI22, BFI27, BFI32, BFI37, BFI42, BFI47, BFI52, BFI57), na.rm=T),
+    bfi_C = rowMeans(select(., BFI03, BFI08, BFI13, BFI18, BFI23, BFI28, BFI33, BFI38, BFI43, BFI48, BFI53, BFI58), na.rm=T),
+    bfi_N = rowMeans(select(., BFI04, BFI09, BFI14, BFI19, BFI24, BFI29, BFI34, BFI39, BFI44, BFI49, BFI54, BFI59), na.rm=T),
+    bfi_O = rowMeans(select(., BFI05, BFI10, BFI15, BFI20, BFI25, BFI30, BFI35, BFI40, BFI45, BFI50, BFI55, BFI60), na.rm=T)
+  )
+
+```
+
+## DASS-21
+
+```{r}
+# 1. Renomeação para DASS01 a DASS21
+dass_names <- paste0("DASS", sprintf("%02d", 1:21))
+colnames(data_clean)[92:112] <- dass_names
+
+# 1. Mapa de Conversão 1-4 (para Análise Fatorial costuma ser melhor que 0-3)
+# Se preferir 0-3, basta trocar os números abaixo
+likert_dass_fatorial <- c(
+  "Nunca" = 1,
+  "Às vezes" = 2,
+  "Frequentemente" = 3,
+  "Sempre" = 4
+)
+
+# 2. Criando as colunas DASS direto do dado bruto (original 'data')
+# Isso evita o erro de herdar NAs do data_clean anterior
+for(i in 1:21) {
+  orig_col <- 91 + i  # As colunas DASS começam na 92
+  new_name <- paste0("DASS", sprintf("%02d", i))
+  data_clean[[new_name]] <- as.numeric(likert_dass_fatorial[data[[orig_col]]])
+}
+```
+
+## ALMA
+
+```{r}
+
+
+# 1. Definição dos nomes das subvariáveis (11 por trecho)
+sub_names <- c("ativo", "energ", "atent", "relax", "sonol", 
+               "prazer", "felic", "humor", "desag", "trist", "txt")
+
+# 2. Gerando todos os nomes de T01 a T10
+all_musical_names <- map(1:10, ~ paste0("T", sprintf("%02d", .x), "_", sub_names)) %>% unlist()
+
+# 3. Aplicando a renomeação ao data_clean
+colnames(data_clean)[113:222] <- all_musical_names
+
+# 4. Mapa de Conversão de Intensidade (1 a 5)
+likert_intensidade <- c(
+  "Nem um pouco"  = 1,
+  "Um pouco"      = 2,
+  "Moderadamente" = 3,
+  "Muito"         = 4,
+  "Extremamente"  = 5
+)
+
+# 5. Conversão Numérica (Exceto as colunas de texto '_txt')
+numeric_cols <- all_musical_names[!str_detect(all_musical_names, "_txt")]
+
+# Buscando do dado original 'data' para evitar herança de NAs
+for(col_name in all_musical_names) {
+  orig_col_idx <- which(colnames(data_clean) == col_name)
+  
+  if(str_detect(col_name, "_txt")) {
+    # Mantém como texto
+    data_clean[[col_name]] <- data[[orig_col_idx]]
+  } else {
+    # Converte para numérico usando o mapa
+    data_clean[[col_name]] <- as.numeric(likert_intensidade[data[[orig_col_idx]]])
+  }
+}
+
+
+### INVERSÂO 
+
+# 1. Definindo os sufixos que devem ser invertidos
+sufixos_reversos <- c("_relax", "_sonol", "_desag", "_trist")
+
+# 2. Identificando todas as colunas que terminam com esses sufixos
+cols_para_inverter <- names(data_clean) %>% 
+  keep(~ any(str_ends(.x, sufixos_reversos)))
+
+# 3. Aplicando a inversão (6 - x)
+data_clean <- data_clean %>%
+  mutate(across(all_of(cols_para_inverter), ~ 6 - .x))
+
+```
+
+
+# Análises descritivas
+
+```{r}
+library(tidyverse)
+library(psych)
+
+# --- A. Tabela de Frequências para Variáveis Categóricas ---
+# Sexo, Identidade de Gênero, Escolaridade e Treino Musical
+desc_categoricas <- data_clean %>%
+  dplyr::select(sex, gender_identity, education_level, music_training, work_sector) %>%
+  gather(variable, value) %>%
+  count(variable, value) %>%
+  group_by(variable) %>%
+  mutate(percentage = (n / sum(n)) * 100)
+
+print(desc_categoricas)
+
+# --- B. Estatística Descritiva para Idade ---
+describe(data_clean$age)
+
+
+# --- C. Visualização Estratégica (Opcional, mas ajuda no relatório) ---
+ggplot(data_clean, aes(x = education_level)) + 
+  geom_bar(fill = "steelblue") + 
+  theme_minimal() + 
+  labs(title = "Distribuição de Escolaridade", x = "Nível", y = "Frequência")
+```
+### Mais mulheres (p < 0,05)
+
+```{r}
+# Teste de Qui-Quadrado para aderência (Equilíbrio de Gênero)
+sex_table <- table(data_clean$sex)
+# Removendo "Prefiro não declarar" para o teste
+sex_table <- sex_table[names(sex_table) %in% c("Feminino", "Masculino")]
+chisq.test(sex_table)
+``` 
+
+
+```{r}
+library(psych)
+
+# A. Descritiva Geral das Categóricas
+data_clean %>%
+  select(sex, gender_identity, education_level, music_training, work_sector) %>%
+  summary()
+
+# B. Verificação de Gênero (Reporte os NAs no seu paper)
+table(data_clean$gender_identity, useNA = "always")
+
+# C. Teste de Diferença de Idade entre Sexos (Normalidade check)
+# Verificando se a amostra é equilibrada em idade
+t.test(age ~ sex, data = data_clean %>% filter(sex %in% c("Feminino", "Masculino")))
+
+# D. Cruzamento: Escolaridade vs. Treino Musical (Estratégico!)
+table(data_clean$education_level, data_clean$music_training)
+
+```
+
+## Escolaridade vs Treino Musical
+
+
+```{r}
+library(tidyverse)
+
+data_clean <- data_clean %>%
+  mutate(education_grouped = fct_collapse(education_level,
+    Undergrad_Spec = c("Undergraduate", "Postgrad_Spec"),
+    High_School = "High_School",
+    Master = "Master",
+    Doctorate = "Doctorate"
+  ))
+
+teste_assoc <- chisq.test(data_clean$education_level, data_clean$music_training, simulate.p.value = TRUE)
+print(teste_assoc)
+
+# A força da associação
+
+library(lsr)
+cramersV(data_clean$education_level, data_clean$music_training)
+
+```
+
+
+```{r}
+# 1. Gerar a tabela com os novos grupos
+tab_final <- table(data_clean$education_grouped, data_clean$music_training)
+
+# 2. Rodar o Qui-Quadrado
+teste_final <- chisq.test(tab_final, simulate.p.value = TRUE)
+
+# 3. Extrair os Resíduos Padronizados (O Post Hoc real)
+residuos <- teste_final$residuals
+print(round(residuos, 2))
+
+# 4. Visualização de Calor (Para o seu relatório)
+# install.packages("corrplot")
+library(corrplot)
+corrplot(residuos, is.cor = FALSE, method = "color", 
+         tl.col = "black", addCoef.col = "black",
+         title = "Post Hoc: Onde está a associação?",
+         mar=c(0,0,1,0))
+
+```
+
+## Nível de estudo musical por área de trabalho
+
+```{r}
+library(tidyverse)
+library(lsr)
+library(corrplot)
+
+# 1. Gerar a tabela cruzada
+tab_work_music <- table(data_clean$work_sector, data_clean$music_training)
+
+# 2. Rodar o Qui-Quadrado (com simulação devido a células pequenas)
+teste_work <- chisq.test(tab_work_music, simulate.p.value = TRUE)
+print(teste_work)
+
+# 3. Medir a força da associação (Cramer's V)
+cv_work <- cramersV(tab_work_music)
+cat("Cramer's V:", round(cv_work, 3), "\n")
+
+# 4. Extrair os Resíduos Padronizados (Post Hoc)
+residuos_work <- teste_work$residuals
+print(round(residuos_work, 2))
+
+# 5. Visualização de Calor
+corrplot(residuos_work, is.cor = FALSE, method = "color", 
+         tl.col = "black", addCoef.col = "black",
+         title = "Post Hoc: Trabalho vs. Estudo Musical",
+         mar=c(0,0,1,0))
+
+```
+
+# Levantamento de validade 
+
+## DASS-21
+
+```{r}
+library(lavaan)
+library(semPlot)
+
+# Definindo as variáveis para facilitar a escrita do modelo
+dass_items <- paste0("DASS", sprintf("%02d", 1:21))
+
+# --- MODELO 1: TRIFATORIAL CORRELACIONADO (CLÁSSICO) ---
+mod_trifatorial <- '
+  ANX =~ DASS02 + DASS04 + DASS07 + DASS09 + DASS15 + DASS19 + DASS20
+  STR =~ DASS01 + DASS06 + DASS08 + DASS11 + DASS12 + DASS14 + DASS18
+  DEP =~ DASS03 + DASS05 + DASS10 + DASS13 + DASS16 + DASS17 + DASS21
+'
+
+fit_trifatorial <- cfa(mod_trifatorial, data = data_clean, ordered = dass_items, 
+                       estimator = "WLSMV", std.lv = TRUE)
+
+# --- MODELO 2: BIFACTOR (A BUSCA PELO P-FACTOR / FG) ---
+# Aqui fixamos a ortogonalidade para isolar a variância do Fator Geral
+mod_bifactor <- '
+  FG  =~ DASS01 + DASS02 + DASS03 + DASS04 + DASS05 + DASS06 + DASS07 + 
+         DASS08 + DASS09 + DASS10 + DASS11 + DASS12 + DASS13 + DASS14 + 
+         DASS15 + DASS16 + DASS17 + DASS18 + DASS19 + DASS20 + DASS21
+  
+  ANX =~ DASS02 + DASS04 + DASS07 + DASS09 + DASS15 + DASS19 + DASS20
+  STR =~ DASS01 + DASS06 + DASS08 + DASS11 + DASS12 + DASS14 + DASS18
+  DEP =~ DASS03 + DASS05 + DASS10 + DASS13 + DASS16 + DASS17 + DASS21
+'
+
+fit_bifactor <- cfa(mod_bifactor, data = data_clean, ordered = dass_items, 
+                    estimator = "WLSMV", std.lv = TRUE, orthogonal = TRUE)
+
+# --- MODELO 3: UNIDIMENSIONAL ---
+mod_unidim <- '
+  FG =~ DASS01 + DASS02 + DASS03 + DASS04 + DASS05 + DASS06 + DASS07 + 
+        DASS08 + DASS09 + DASS10 + DASS11 + DASS12 + DASS13 + DASS14 + 
+        DASS15 + DASS16 + DASS17 + DASS18 + DASS19 + DASS20 + DASS21
+'
+
+fit_unidim <- cfa(mod_unidim, data = data_clean, ordered = dass_items, 
+                  estimator = "WLSMV", std.lv = TRUE)
+
+```
+
+### Índices de ajuste
+
+```{r}
+# Função para extrair medidas de ajuste
+get_fits <- function(fit_obj, model_name) {
+  measures <- fitMeasures(fit_obj, c("chisq", "df", "cfi", "tli","srmr", "rmsea", 
+                                    "rmsea.ci.lower", "rmsea.ci.upper"))
+  return(c(Model = model_name, round(measures, 3)))
+}
+
+# Comparação de Modelos
+tabela_comparativa <- rbind(
+  get_fits(fit_trifatorial, "Trifatorial"),
+  get_fits(fit_bifactor, "Bifactor (p-factor)"),
+  get_fits(fit_unidim, "Unidimensional")
+)
+
+print(tabela_comparativa)
+
+```
+
+### Fidedignidade Composta 
+
+```{r}
+library(semTools)
+
+compRelSEM(fit_trifatorial)
+compRelSEM(fit_bifactor)
+compRelSEM(fit_unidim)
+```
+
+### Extração dos escores de p-factor
+
+```{r}
+# Extraindo escores fatoriais do modelo Bifactor
+escores_dass <- lavPredict(fit_bifactor)
+
+# Adicionando o p-factor (FG) ao banco principal
+data_clean$dass_p_factor <- escores_dass[, "FG"]
+
+# Verificação: correlação do p-factor com a idade (lembra que deu sig. antes?)
+cor.test(data_clean$dass_p_factor, data_clean$age, method = "pearson")
+
+```
+
+## BFI-2
+
+```{r}
+library(lavaan)
+
+# Definindo os itens por fator
+E_items <- paste0("BFI", sprintf("%02d", c(1, 6, 11, 16, 21, 26, 31, 36, 41, 46, 51, 56)))
+A_items <- paste0("BFI", sprintf("%02d", c(2, 7, 12, 17, 22, 27, 32, 37, 42, 47, 52, 57)))
+C_items <- paste0("BFI", sprintf("%02d", c(3, 8, 13, 18, 23, 28, 33, 38, 43, 48, 53, 58)))
+N_items <- paste0("BFI", sprintf("%02d", c(4, 9, 14, 19, 24, 29, 34, 39, 44, 49, 54, 59)))
+O_items <- paste0("BFI", sprintf("%02d", c(5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60)))
+
+all_bfi_items <- c(E_items, A_items, C_items, N_items, O_items)
+
+# --- MODELO 1: 5 FATORES CORRELACIONADOS ---
+mod_bfi_5 <- paste0('
+  Extraversion      =~ ', paste(E_items, collapse = " + "), '
+  Agreeableness     =~ ', paste(A_items, collapse = " + "), '
+  Conscientiousness =~ ', paste(C_items, collapse = " + "), '
+  Negative_Emot     =~ ', paste(N_items, collapse = " + "), '
+  Open_Mindedness   =~ ', paste(O_items, collapse = " + ")
+)
+
+fit_bfi_5 <- cfa(mod_bfi_5, data = data_clean, ordered = all_bfi_items, 
+                 estimator = "WLSMV", std.lv = TRUE)
+
+# --- MODELO 2: BIFACTOR (Fator Geral de Personalidade - GFP) ---
+mod_bfi_gfp <- paste0('
+  GFP =~ ', paste(all_bfi_items, collapse = " + "), '
+  Extraversion      =~ ', paste(E_items, collapse = " + "), '
+  Agreeableness     =~ ', paste(A_items, collapse = " + "), '
+  Conscientiousness =~ ', paste(C_items, collapse = " + "), '
+  Negative_Emot     =~ ', paste(N_items, collapse = " + "), '
+  Open_Mindedness   =~ ', paste(O_items, collapse = " + ")
+)
+
+fit_bfi_gfp <- cfa(mod_bfi_gfp, data = data_clean, ordered = all_bfi_items, 
+                   estimator = "WLSMV", std.lv = TRUE, orthogonal = TRUE)
+
+mod_bfi_hier <- paste0(' 
+  Extraversion      =~ ', paste(E_items, collapse = " + "), '
+  Agreeableness     =~ ', paste(A_items, collapse = " + "), '
+  Conscientiousness =~ ', paste(C_items, collapse = " + "), '
+  Negative_Emot     =~ ', paste(N_items, collapse = " + "), '
+  Open_Mindedness   =~ ', paste(O_items, collapse = " + "), '
+  
+  GFP =~ Extraversion  + Agreeableness + Conscientiousness + Negative_Emot + Open_Mindedness'
+)
+
+fit_bfi_hier <- cfa(mod_bfi_hier, data = data_clean, ordered = all_bfi_items, 
+                   estimator = "WLSMV", std.lv = TRUE, orthogonal = TRUE)
+
+```
+
+
+### Índices de ajuste
+
+```{r}
+# Função de extração de fit (incluindo seus favoritos)
+get_bfi_fits <- function(fit_obj, model_name) {
+  if (lavInspect(fit_obj, "converged")) {
+    measures <- fitMeasures(fit_obj, c("chisq", "df", "cfi", "tli", "srmr", "rmsea", "rmsea.ci.lower", "rmsea.ci.upper"))
+    return(c(Model = model_name, round(measures, 3)))
+  } else {
+    return(c(Model = model_name, "DNC")) # Did Not Converge
+  }
+}
+
+tabela_bfi <- rbind(
+  get_bfi_fits(fit_bfi_5, "BFI 5-Factors"),
+  get_bfi_fits(fit_bfi_gfp, "BFI GFP (Bifactor)"),
+  get_bfi_fits(fit_bfi_hier, "BFI Hierarchical (2orf)")
+)
+
+print(tabela_bfi)
+```
+
+### TRI Rasch TRI para cada fator do Big Five
+
+#### Extroversão
+
+```{r}
+library(eRm)
+library(dplyr)
+
+# Definindo os vetores de itens (baseado na estrutura 1-60 do BFI-2)
+E_items <- paste0("BFI", sprintf("%02d", c(1, 6, 11, 16, 21, 26, 31, 36, 41, 46, 51, 56)))
+A_items <- paste0("BFI", sprintf("%02d", c(2, 7, 12, 17, 22, 27, 32, 37, 42, 47, 52, 57)))
+C_items <- paste0("BFI", sprintf("%02d", c(3, 8, 13, 18, 23, 28, 33, 38, 43, 48, 53, 58)))
+N_items <- paste0("BFI", sprintf("%02d", c(4, 9, 14, 19, 24, 29, 34, 39, 44, 49, 54, 59)))
+O_items <- paste0("BFI", sprintf("%02d", c(5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60)))
+
+
+data_E <- na.omit(data_clean[, E_items])
+pcm_E  <- PCM(data_E)
+
+thres_E <- thresholds(pcm_E)
+print(thres_E$threshtable[[1]])
+
+
+data_E_revisao <- data_clean %>%
+  select(all_of(E_items)) %>%
+  mutate(across(everything(), ~ case_when(
+    . == 1 ~ 1,        # Discordo totalmente
+    . %in% c(2, 3) ~ 2, # Discordo em parte + Neutro
+    . == 4 ~ 3,        # Concordo em parte
+    . == 5 ~ 4,        # Concordo totalmente
+    TRUE ~ NA_real_
+  ))) %>%
+  as.data.frame() %>%
+  na.omit()
+
+# 3. Rodando o Modelo de Créditos Parciais (PCM)
+pcm_E_rev <- PCM(data_E_revisao)
+
+# 4. Verificando os Thresholds (O seu objetivo agora)
+thres_E_rev <- thresholds(pcm_E_rev)
+print(thres_E_rev$threshtable[[1]])
+
+
+data_E_revisao <- data_E_revisao[c(1,2,3,5,6,8,9,12)]
+
+# 5. Verificando o Item Fit (Para ver quem "ajusta" ao traço)
+pcm_E_rev <- PCM(data_E_revisao)
+pp_E_rev <- person.parameter(pcm_E_rev)
+fit_E_rev <- itemfit(pp_E_rev)
+print(fit_E_rev)
+
+data_E_revisao <- data_E_revisao[-3]
+pcm_E_rev <- PCM(data_E_revisao)
+pp_E_rev <- person.parameter(pcm_E_rev)
+fit_E_rev <- itemfit(pp_E_rev)
+print(fit_E_rev)
+
+```
+
+#### Amabilidade
+
+```{r}
+
+data_A <- na.omit(data_clean[, A_items])
+pcm_A  <- PCM(data_A)
+
+thres_A <- thresholds(pcm_A)
+print(thres_A$threshtable[[1]])
+
+
+# 2. Recodificando Amabilidade: Unificando categorias 2 e 3
+data_A_revisao <- data_clean %>%
+  select(all_of(A_items)) %>%
+  mutate(across(everything(), ~ case_when(
+    . == 1 ~ 1,        # Discordo totalmente
+    . %in% c(2, 3) ~ 2, # Discordo em parte + Neutro
+    . == 4 ~ 3,        # Concordo em parte
+    . == 5 ~ 4,        # Concordo totalmente
+    TRUE ~ NA_real_
+  ))) %>%
+  as.data.frame() %>%
+  na.omit()
+
+# 3. Rodando o Modelo de Créditos Parciais (PCM)
+pcm_A_rev <- PCM(data_A_revisao)
+
+# 4. Verificando os Thresholds (O seu objetivo agora)
+thres_A_rev <- thresholds(pcm_A_rev)
+print(thres_A_rev$threshtable[[1]])
+
+data_A_revisao <- data_A_revisao[c(1,6,7,12)]
+
+
+# 5. Verificando o Item Fit (Para ver quem "ajusta" ao traço)
+pcm_A_rev <- PCM(data_A_revisao)
+pp_A_rev <- person.parameter(pcm_A_rev)
+fit_A_rev <- itemfit(pp_A_rev)
+print(fit_A_rev)
+SepRel(pp_A_rev)
+
+```
+
+#### Conscienciousidade 
+
+```{r}
+data_C <- na.omit(data_clean[, C_items])
+pcm_C  <- PCM(data_C)
+thres_C <- thresholds(pcm_C)
+print(thres_C$threshtable[[1]])
+
+# 1. Recodificando: unindo apenas 2 e 3
+# 1 -> 1 (Discordo totalmente)
+# 2 e 3 -> 2 (Não concordo / Neutro)
+# 4 -> 3 (Concordo em parte)
+# 5 -> 4 (Concordo totalmente)
+data_C_4cat <- data_clean %>%
+  select(all_of(C_items)) %>%
+  mutate(across(everything(), ~ case_when(
+    . == 1 ~ 1,
+    . %in% c(2, 3) ~ 2,
+    . == 4 ~ 3,
+    . == 5 ~ 4
+  )))
+
+# 2. Rodando o PCM (Créditos Parciais) na nova escala
+# Importante: eRm exige data.frame sem NAs para o person.parameter posterior
+data_C_4_clean <- as.data.frame(na.omit(data_C_4cat))
+pcm_C_4 <- PCM(data_C_4_clean)
+
+# 3. Verificando os Thresholds (Agora devem ser T1 < T2 < T3)
+thres_C_4 <- thresholds(pcm_C_4)
+print(thres_C_4$threshtable[[1]])
+
+# 4. Verificando Item Fit
+pp_C_4 <- person.parameter(pcm_C_4)
+fit_C_4 <- itemfit(pp_C_4)
+print(fit_C_4)
+
+
+
+# Selecionando os 5 sobreviventes
+items_C_final <- paste0("BFI", sprintf("%02d", c(13, 18, 33, 38, 53)))
+data_C_final <- data_C_4_clean[, items_C_final]
+
+# Teste final de Rasch apenas com eles
+pcm_C_final <- PCM(data_C_final)
+fit_C_final <- itemfit(person.parameter(pcm_C_final))
+
+thresholds(pcm_C_final)
+
+pp_C_4 <- person.parameter(pcm_C_final)
+itemfit(pp_C_4)
+
+
+```
+
+#### Neuroticismo
+
+```{r}
+
+data_N <- na.omit(data_clean[, N_items])
+pcm_N  <- PCM(data_N)
+thres_N <- thresholds(pcm_N)
+print(thres_N$threshtable[[1]])
+
+
+# 1. Aplicando a junção de 2 e 3 para o Neuroticismo
+data_N_4cat <- data_clean %>%
+  select(all_of(N_items)) %>%
+  mutate(across(everything(), ~ case_when(
+    . == 1 ~ 1,
+    . %in% c(2, 3) ~ 2,
+    . == 4 ~ 3,
+    . == 5 ~ 4
+  )))
+
+# 2. Rodando o PCM na nova escala
+data_N_4_clean <- as.data.frame(na.omit(data_N_4cat))
+pcm_N_4 <- PCM(data_N_4_clean)
+
+# 3. Verificando os novos Thresholds
+thres_N_4 <- thresholds(pcm_N_4)
+print(thres_N_4$threshtable[[1]])
+
+
+# 1. Criando o objeto com os 9 sobreviventes
+items_N_final <- paste0("BFI", sprintf("%02d", c(04, 09, 14, 19, 24, 29, 49, 54, 59)))
+data_N_final  <- data_N_4_clean[, items_N_final]
+
+# 2. Rodando o Modelo Rasch Final
+pcm_N_final <- PCM(data_N_final)
+pp_N <- person.parameter(pcm_N_final)
+fit_N <- itemfit(pp_N)
+print(fit_N)
+
+```
+
+#### Abertura à experiência
+
+```{r}
+
+data_O <- na.omit(data_clean[, O_items])
+pcm_O  <- PCM(data_O)
+thres_O <- thresholds(pcm_O)
+print(thres_O$threshtable[[1]])
+
+library(eRm)
+
+# 1. Recodificando Abertura (O) - Unindo 2 e 3
+data_O_4cat <- data_clean %>%
+  select(all_of(O_items)) %>%
+  mutate(across(everything(), ~ case_when(
+    . == 1 ~ 1,
+    . %in% c(2, 3) ~ 2,
+    . == 4 ~ 3,
+    . == 5 ~ 4
+  )))
+
+# 2. Rodando o PCM na nova escala
+data_O_4_clean <- as.data.frame(na.omit(data_O_4cat))
+pcm_O_4 <- PCM(data_O_4_clean)
+
+# 3. Verificando os novos Thresholds
+thres_O_4 <- thresholds(pcm_O_4)
+print(thres_O_4$threshtable[[1]])
+
+
+## Salvos
+items_O_final <- paste0("BFI", sprintf("%02d", c(15, 20, 30, 35, 40, 60)))
+data_O_final <- data_O_4_clean[, items_O_final]
+
+# 3. Teste de Invariância (Andersen) para garantir a robustez
+pcm_O_final <- PCM(data_O_final)
+pp_O <- person.parameter(pcm_O_final)
+fit_O  <- itemfit(pp_O)
+print(fit_O)
+
+
+```
+
+### BFI-2 com itens selcionados
+
+```{r}
+library(tidyverse)
+library(lavaan)
+
+# 1. Definindo os itens finais purificados
+final_E <- paste0("BFI", sprintf("%02d", c(01, 06, 21, 26, 36, 41, 56)))
+final_A <- paste0("BFI", sprintf("%02d", c(02, 27, 32, 57)))
+final_C <- paste0("BFI", sprintf("%02d", c(13, 18, 33, 38, 53)))
+final_N <- paste0("BFI", sprintf("%02d", c(04, 09, 14, 19, 24, 29, 49, 54, 59)))
+final_O <- paste0("BFI", sprintf("%02d", c(15, 20, 30, 35, 40, 60)))
+
+all_final_items <- c(final_E, final_A, final_C, final_N, final_O)
+
+# 2. Criando o banco definitivo (Padronização Universal 2+3)
+data_bfi_final <- data_clean %>%
+  mutate(across(all_of(all_final_items), ~ case_when(
+    . == 1 ~ 1,
+    . %in% c(2, 3) ~ 2,
+    . == 4 ~ 3,
+    . == 5 ~ 4,
+    TRUE ~ NA_real_
+  ))) %>%
+  select(all_of(all_final_items))
+
+# 3. Modelo de 5 Fatores Correlacionados
+mod_bfi_final <- '
+  Extro     =~ BFI01 + BFI06 + BFI21 + BFI26 + BFI36 + BFI41 + BFI56
+  Agree     =~ BFI02 + BFI27 + BFI32 + BFI57
+  Consc     =~ BFI13 + BFI18 + BFI33 + BFI38 + BFI53
+  Neuro     =~ BFI04 + BFI09 + BFI14 + BFI19 + BFI24 + BFI29 + BFI49 + BFI54 
+  OpenM     =~ BFI15 + BFI20 + BFI30 + BFI35 + BFI40 + BFI60
+'
+
+fit_bfi_final <- cfa(mod_bfi_final, data = data_bfi_final, 
+                     ordered = TRUE, estimator = "WLSMV", std.lv = TRUE)
+
+# 4. Fit Measures (Os seus favoritos)
+fitMeasures(fit_bfi_final, fit.measures = c("chisq","df","pvalue","cfi","tli", "rmsea", 
+                                            "rmsea.ci.lower", "rmsea.ci.upper","srmr"))
+
+compRelSEM(fit_bfi_final)
+summary(fit_bfi_final, standardized = T, rsquare = T)
+
+library(semPlot)
+semplot_modelo <- semPaths(fit_bfi_final,"std",layout="circle",residuals=F,sizeLat=8,sizeLat2=8,edge.color="black",edge.label.cex=0.8,
+                           mar=c(2, 2, 2, 2),esize=4,curvePivot = F, intercepts=F,thresholds = F,
+                           nCharNodes=0,sizeMan=3.5, edge.label.position=0.5)
+```
+
+### BFI-2 bifactor campeã
+
+```{r}
+# --- MODELO B: BIFACTOR (GFP e específicos competindo pelos itens) ---
+# Nota: Todos os fatores devem ser ortogonais no Bifactor puro
+mod_bfi_bifactor <- '
+  GFP =~ BFI01 + BFI06 + BFI21 + BFI26 + BFI36 + BFI41 + BFI56 + 
+         BFI02 + BFI27 + BFI32 + BFI57 + 
+         BFI13 + BFI18 + BFI33 + BFI38 + BFI53 + 
+         BFI04 + BFI09 + BFI14 + BFI19 + BFI24 + BFI29 + BFI49 + BFI54 + 
+         BFI15 + BFI20 + BFI30 + BFI35 + BFI40 + BFI60
+
+  E_s =~ BFI01 + BFI06 + BFI21 + BFI26 + BFI36 + BFI41 + BFI56
+  A_s =~ BFI02 + BFI27 + BFI32 + BFI57
+  C_s =~ BFI13 + BFI18 + BFI33 + BFI38 + BFI53
+  N_s =~ BFI04 + BFI09 + BFI14 + BFI19 + BFI24 + BFI29 + BFI49 + BFI54
+  O_s =~ BFI15 + BFI20 + BFI30 + BFI35 + BFI40 + BFI60
+'
+
+fit_bfi_bifactor <- cfa(mod_bfi_bifactor, data = data_bfi_final, 
+                        ordered = TRUE, estimator = "WLSMV", std.lv = TRUE, 
+                        orthogonal = TRUE)
+
+fitMeasures(fit_bfi_bifactor, fit.measures = c("chisq","df","pvalue","cfi","tli", "rmsea", 
+                                             "rmsea.ci.lower", "rmsea.ci.upper","srmr"))
+
+compRelSEM(fit_bfi_bifactor)
+
+semPaths(fit_bfi_bifactor,"std",layout="tree2",residuals=F,sizeLat=8,sizeLat2=8,
+         edge.color="black",edge.label.cex=0.8, mar=c(2, 2, 2, 2),esize=4,
+         curvePivot = F, intercepts=F,thresholds = F, nCharNodes=0,sizeMan=3.5, 
+         edge.label.position=0.8, bifactor = "GFP")
+
+
+```
+
+### DeYoung BFI-2
+
+
+```{r}
+# --- MODELO C: SEGUNDA ORDEM (DeYoung) ---
+mod_bfi_plast_est <- '
+  Extraversion      =~ BFI01 + BFI06 + BFI21 + BFI26 + BFI36 + BFI41 + BFI56
+  Agreeableness     =~ BFI02 + BFI27 + BFI32 + BFI57
+  Conscientiousness =~ BFI13 + BFI18 + BFI33 + BFI38 + BFI53
+  Negative_Emot     =~ BFI04 + BFI09 + BFI14 + BFI19 + BFI24 + BFI29 + BFI49 + BFI54
+  Open_Mindedness   =~ BFI15 + BFI20 + BFI30 + BFI35 + BFI40 + BFI60
+
+  Plasticity =~ Extraversion + Open_Mindedness
+  Stability  =~ Agreeableness + Conscientiousness + Negative_Emot
+  
+'
+
+fit_bfi_2order <- cfa(mod_bfi_plast_est, data = data_bfi_final, 
+                      ordered = TRUE, estimator = "WLSMV", std.lv = TRUE)
+
+fitMeasures(fit_bfi_2order, fit.measures = c("chisq","df","pvalue","cfi","tli", "rmsea", 
+                                               "rmsea.ci.lower", "rmsea.ci.upper","srmr"))
+compRelSEM(fit_bfi_2order, higher = c("Plasticity","Stability"))
+
+
+```
+
+### BFI-2 DeYoung apenas com Plasticidade de segunda ordem
+
+```{r}
+mod_bfi_plast_est <- '
+  Extraversion      =~ BFI01 + BFI06 + BFI21 + BFI26 + BFI36 + BFI41 + BFI56
+  Agreeableness     =~ BFI02 + BFI27 + BFI32 + BFI57
+  Conscientiousness =~ BFI13 + BFI18 + BFI33 + BFI38 + BFI53
+  Negative_Emot     =~ BFI04 + BFI09 + BFI14 + BFI19 + BFI24 + BFI29 + BFI49 + BFI54
+  Open_Mindedness   =~ BFI15 + BFI20 + BFI30 + BFI35 + BFI40 + BFI60
+
+  Plasticity =~ Extraversion + Open_Mindedness
+  
+'
+
+fit_bfi_2order <- cfa(mod_bfi_plast_est, data = data_bfi_final, 
+                      ordered = TRUE, estimator = "WLSMV", std.lv = TRUE)
+
+fitMeasures(fit_bfi_2order, fit.measures = c("chisq","df","pvalue","cfi","tli", "rmsea", 
+                                               "rmsea.ci.lower", "rmsea.ci.upper","srmr"))
+compRelSEM(fit_bfi_2order, higher = c("Plasticity"))
+
+#semPaths(fit_bfi_2order,"std",layout="circle2",residuals=F,sizeLat=8,sizeLat2=8,
+#         edge.color="black",edge.label.cex=0.8, mar=c(2, 2, 2, 2),esize=4,
+#         curvePivot = F, intercepts=F,thresholds = F, nCharNodes=0,sizeMan=3.5, 
+#         edge.label.position=0.8, bifactor = "Plasticity")
+
+```
+
+### BFI-2 bifactor com Estabilidade Emocional (neuroticismo invertedo)
+
+
+```{r}
+# 1. Invertendo Neuroticismo para se tornar "Estabilidade Emocional"
+# 4-cat: 1->4, 2->3, 3->2, 4->1
+data_bfi_final <- data_bfi_final %>%
+  mutate(across(all_of(final_N), ~ 5 - .x))
+
+# 2. Definindo o Modelo Unidimensional de Segunda Ordem (O "Big One")
+mod_gfp_ortho <- '
+  Extraversion      =~ BFI01 + BFI06 + BFI21 + BFI26 + BFI36 + BFI41 + BFI56
+  Agreeableness     =~ BFI02 + BFI27 + BFI32 + BFI57
+  Conscientiousness =~ BFI13 + BFI18 + BFI33 + BFI38 + BFI53
+  Emotional_Stab    =~ BFI04 + BFI09 + BFI14 + BFI19 + BFI24 + BFI29 + BFI49 + BFI54
+  Open_Mindedness   =~ BFI15 + BFI20 + BFI30 + BFI35 + BFI40 + BFI60
+
+  GFP =~ BFI01 + BFI06 + BFI21 + BFI26 + BFI36 + BFI41 + BFI56 + 
+         BFI02 + BFI27 + BFI32 + BFI57 + 
+         BFI13 + BFI18 + BFI33 + BFI38 + BFI53 + 
+         BFI04 + BFI09 + BFI14 + BFI19 + BFI24 + BFI29 + BFI49 + BFI54 + 
+         BFI15 + BFI20 + BFI30 + BFI35 + BFI40 + BFI60
+'
+
+fit_gfp_ortho <- cfa(mod_gfp_ortho, data = data_bfi_final, orthogonal = TRUE,
+                     ordered = TRUE, estimator = "WLSMV", std.lv = TRUE)
+
+# 3. Fit Measures
+fitMeasures(fit_gfp_ortho, fit.measures = c("chisq","df","pvalue","cfi","tli", "rmsea", 
+                                             "rmsea.ci.lower", "rmsea.ci.upper","srmr"))
+# 4. Confiabilidade do Fator Geral
+compRelSEM(fit_gfp_ortho)
+
+summary(fit_gfp_ortho, standardized = T)
+
+```
+
+### Extração dos escores de GFP Estabilidade Emocional, Abertura e Agradabilidade
+
+```{r}
+# 1. Extraindo escores do modelo Bifactor Orthogonal
+# Pegaremos o GFP (Personalidade Geral) e o N_s (Neuroticismo Residual)
+# O N_s é importante porque ele ainda manteve confiabilidade (0.627)
+bfi_final_scores <- lavPredict(fit_gfp_ortho)
+
+# 2. Adicionando ao banco principal
+data_clean$bfi_GFP_Intensity <- bfi_final_scores[, "GFP"]
+data_clean$bfi_N_Residual    <- bfi_final_scores[, "Emotional_Stab"] 
+data_clean$bfi_O_Residual    <- bfi_final_scores[, "Open_Mindedness"]
+data_clean$bfi_A_Residual    <- bfi_final_scores[, "Agreeableness"] 
+
+```
+
+
+# ALMA
+
+## Dados
+
+```{r}
+
+data_clean <- data_clean %>% mutate(subject_id = row_number())
+
+
+# 1. Criando o formato longo apenas com os números
+dados_lavaan_clean <- data_clean %>%
+  # Selecionamos o ID e todas as colunas de trecho que NÃO terminam em 'txt'
+  select(ID = subject_id, matches("^T\\d{2}_")) %>%
+  select(-ends_with("_txt")) %>% 
+  pivot_longer(
+    cols = -ID,
+    names_to = c("Trecho", "Item"),
+    names_pattern = "T(\\d{2})_(.*)",
+    values_to = "Escore"
+  ) %>%
+  mutate(Escore = as.numeric(Escore)) %>%
+  # Voltamos para o formato wide por escuta musical
+  pivot_wider(names_from = Item, values_from = Escore) %>%
+  # Padronizando os nomes para o seu script de PLS (Iniciais Maiúsculas)
+  rename(
+    Ativo = ativo, Energizado = energ, Atento = atent,
+    Relaxado = relax, Sonolento = sonol, Prazer = prazer,
+    Felicidade = felic, Bom_humor = humor, Desagrado = desag,
+    Tristeza = trist
+  )
+
+# 2. Agora o join com Expertise e as Inversões
+# (Assumindo que o objeto 'data' original está carregado)
+df_expertise <- data %>%
+  select(ID_orig = 1, Expertise_Raw = 9) %>%
+  mutate(ID = row_number()) %>% # Garante que o ID bate com o subject_id
+  mutate(Expertise = case_when(
+    str_detect(Expertise_Raw, "Não estudei") ~ 1,
+    str_detect(Expertise_Raw, "De 1 mês a 1 ano") ~ 2,
+    str_detect(Expertise_Raw, "De 1 ano a 5 anos") ~ 3,
+    str_detect(Expertise_Raw, "5 anos ou mais") ~ 4,
+    TRUE ~ 1
+  ))
+
+df_hcm <- dados_lavaan_clean %>%
+  left_join(df_expertise %>% select(ID, Expertise), by = "ID") %>%
+  mutate(
+    Relax_Inv = 6 - Relaxado,
+    Sono_Inv  = 6 - Sonolento,
+    Desag_Inv = 6 - Desagrado,
+    Trist_Inv = 6 - Tristeza
+  ) %>%
+  as.data.frame()
+
+library(polycor)
+ply_hcnm <- polychoric(df_hcm[3:12])
+corrplot(ply_hcnm$rho)
+```
+
+## PLS-SEM 
+
+```{r}
+library(seminr)
+
+# --- ESTÁGIO 1 ---
+mm1 <- constructs(
+  composite("ARS", c("Ativo", "Energizado", "Atento", "Relax_Inv"), weights = mode_A),
+  composite("VAL", c("Prazer", "Felicidade", "Bom_humor","Desagrado"), weights = mode_A)
+)
+
+pls1 <- estimate_pls(data = df_hcm, measurement_model = mm1, 
+                     structural_model = relationships(paths(from="ARS", to="VAL")))
+
+# --- ESTÁGIO 2 ---
+scores_1a <- as.data.frame(pls1$construct_scores)
+dados_estagio2 <- cbind(scores_1a, Expertise = df_hcm$Expertise)
+
+summ1 <-summary(pls1)
+plot(pls1)
+```
+
+```{r}
+mm2 <- constructs(
+  composite("Intensidade", c("ARS", "VAL"), weights = mode_A),
+  composite("Expertise_Ancora", "Expertise", weights = mode_A)
+)
+
+pls2 <- estimate_pls(data = dados_estagio2, measurement_model = mm2, 
+                     structural_model = relationships(paths(from="Intensidade", to="Expertise_Ancora")))
+
+# RESULTADOS FINAIS
+summ <- summary(pls2) 
+
+boot_music <- bootstrap_model(pls2, nboot = 1000)
+summary(boot_music)
+
+plot(pls2)
+```
+
+```{r}
+# --- A. Validade Discriminante (Estágio 1) ---
+# O HTMT dirá se ARS e VAL são constructos realmente distintos
+print(summary(pls1)$validity$htmt)
+
+# --- B. Multicolinearidade (Estágio 2) ---
+# O VIF verificará se há redundância entre os indicadores da Intensidade
+# Em modelos de 2ª ordem, queremos VIF < 5 (ideal < 3)
+print(summary(pls2)$vif_predecessors)
+
+
+
+# 1. Extraindo o Escore de Intensidade Musical do PLS
+# (Cada linha representa uma das 2160 escutas)
+score_pls <- as.numeric(pls2$construct_scores[, "Intensidade"])
+
+
+```
+
+## PCA
+
+```{r}
+# 1. Preparando a Matriz de Itens (Usando as inversões que salvaram o PLS)
+# Itens: Ativo, Energizado, Atento, Relax_Inv, Prazer, Felicidade, Bom_humor, Desag_Inv, Trist_Inv
+itens_triangulacao <- df_hcm %>%
+  select(Ativo, Energizado, Atento, Relax_Inv, Prazer, Felicidade, Bom_humor, Desagrado)
+
+# Extraindo o PC1 Não-Rotacionado (A magnitude bruta da variância)
+pca_res <- principal(itens_triangulacao, nfactors = 3, rotate = "none")
+pca_res$loadings
+score_pca <- as.numeric(pca_res$scores[, 1])
+
+```
+
+## Análise Exploratória de Grafos Hierárquica
+
+```{r ,message=FALSE,warning=FALSE}
+library(EGAnet)
+
+hega_res <- hierEGA(itens_triangulacao, algorithm = "louvain")
+score_hega <- as.numeric(rowMeans(hega_res$parameters$lower_scores))
+
+```
+
+## CFA
+
+```{r}
+itens_finais <- df_hcm %>%
+  select(Ativo, Energizado, Atento, Relax_Inv, Prazer, Felicidade, Bom_humor, Desagrado)
+
+```
+
+
+
+```{r}
+mod_cfa_bifactor <- '
+  Intensity  =~ Ativo + Energizado + Atento + Relax_Inv + Prazer + 
+  Felicidade + Bom_humor + Desagrado  
+  
+  Arousal =~ Ativo + Energizado + Atento + Relax_Inv 
+  Valence =~ Prazer + Felicidade + Bom_humor + Desagrado 
+  
+  
+'
+fit_cfa_final <- cfa(mod_cfa_bifactor, data = df_hcm, orthogonal = TRUE,
+                     ordered = TRUE, estimator = "WLSMV")
+
+fitMeasures(fit_cfa_final, fit.measures = c("chisq","df","pvalue","cfi", "rmsea", 
+                                          "rmsea.ci.lower", "rmsea.ci.upper","srmr"))
+
+
+#modindices(fit_cfa_final, sort. = T)
+compRelSEM(fit_cfa_final)
+
+score_cfa <- lavPredict(fit_cfa_final) # Escore Fatorial Latente
+score_cfa <- as.data.frame(score_cfa)
+
+
+```
+### Falha dos modelos não bifactor
+
+```{r}
+mod_cfa <- '
+
+  Arousal =~ Ativo + Energizado + Atento + Relax_Inv 
+  Valence =~ Prazer + Felicidade + Bom_humor + Desagrado 
+  
+  
+'
+fit_cfa <- cfa(mod_cfa, data = df_hcm, orthogonal = FALSE,
+               ordered = TRUE, estimator = "WLSMV")
+
+fitMeasures(fit_cfa, fit.measures = c("chisq","df","pvalue","cfi", "rmsea", 
+                                          "rmsea.ci.lower", "rmsea.ci.upper","srmr"))
+
+
+#modindices(fit_cfa_final, sort. = T)
+compRelSEM(fit_cfa)
+
+
+```
+
+
+```{r}
+mod_cfa <- '
+  FG =~ Arousal + Valence
+   
+  Arousal =~ Ativo + Energizado + Atento + Relax_Inv 
+  Valence =~ Prazer + Felicidade + Bom_humor + Desagrado 
+  
+  
+'
+fit_cfa <- cfa(mod_cfa, data = df_hcm, orthogonal = FALSE,
+               ordered = TRUE, estimator = "WLSMV")
+
+fitMeasures(fit_cfa, fit.measures = c("chisq","df","pvalue","cfi", "rmsea", 
+                                          "rmsea.ci.lower", "rmsea.ci.upper","srmr"))
+
+
+#modindices(fit_cfa_final, sort. = T)
+compRelSEM(fit_cfa, higher = "FG")
+
+```
+### Validade da soma dos escores
+
+```{r}
+
+# 1. Calcular o escore somado bruto (Adição simples dos 8 itens)
+df_hcm$Soma_Bruta <- df_hcm$Ativo + df_hcm$Energizado + df_hcm$Atento + 
+  df_hcm$Relax_Inv + df_hcm$Prazer + df_hcm$Felicidade + 
+  df_hcm$Bom_humor + df_hcm$Desagrado
+
+# 2. Criar um dataframe juntando a Soma Bruta com as extrações latentes
+df_triangulacao_total <- data.frame(
+  PCA = score_pca,      
+  hEGA = score_hega,    
+  PLS = score_pls,      
+  CFA = score_cfa$Intensity
+)
+
+df_validade_pratica <- data.frame(
+  Soma_Bruta = df_hcm$Soma_Bruta,
+  CFA_Intensidade = score_cfa$Intensity,
+  PLS_Intensidade = df_triangulacao_total$PLS 
+)
+
+# 3. Calcular a Matriz de Correlação (Spearman, por conta da soma ordinal)
+matriz_soma <- cor(df_validade_pratica, method = "spearman")
+
+cat("\n>>> CORRELAÇÃO: SOMA BRUTA vs. ESCORES COMPLEXOS <<<\n")
+print(round(matriz_soma, 3))
+
+MVN::mvn(df_triangulacao_total, univariate_test = "SW")$univariate_normality
+
+# 3. Matriz de Correlação Spearman
+matriz_finalissima <- cor(df_triangulacao_total, method = "spearman", use = "pairwise.complete.obs")
+print(round(matriz_finalissima, 3))
+```
+
+## Relações entre os modelos de mensuração 
+
+```{r}
+
+library(tidyverse)
+library(lme4)
+library(lmerTest)
+
+# 1. Reconstruindo o banco longo com TODAS as variáveis necessárias
+# Repetimos cada linha de data_clean 10 vezes para alinhar com os 10 trechos musicais
+data_long_completo <- data_clean %>%
+  select(subject_id, age, sex, education_grouped, 
+         bfi_GFP_Intensity, bfi_N_Residual, bfi_O_Residual, bfi_A_Residual, dass_p_factor) %>%
+  slice(rep(1:n(), each = 10)) %>%
+  mutate(excerpt_id = rep(paste0("T", sprintf("%02d", 1:10)), times = 216))
+
+# 2. Anexando os escores padronizados da triangulação (2160 linhas)
+# (Usamos o df_triangulacao_total que você já validou)
+data_long_completo$score_PCA  <- as.numeric(scale(df_triangulacao_total$PCA))
+data_long_completo$score_hEGA <- as.numeric(scale(df_triangulacao_total$hEGA))
+data_long_completo$score_PLS  <- as.numeric(scale(df_triangulacao_total$PLS))
+data_long_completo$score_CFA  <- as.numeric(scale(df_triangulacao_total$CFA))
+
+# Definindo a fórmula definitiva
+formula_full <- " ~ bfi_GFP_Intensity + bfi_N_Residual + bfi_O_Residual + bfi_A_Residual +
+                     dass_p_factor + age + education_grouped + sex +
+                     (1 | subject_id) + (1 | excerpt_id)"
+
+# Rodando os modelos
+fit_pca  <- lmer(as.formula(paste0("score_PCA",  formula_full)), data = data_long_completo)
+fit_hega <- lmer(as.formula(paste0("score_hEGA", formula_full)), data = data_long_completo)
+fit_pls  <- lmer(as.formula(paste0("score_PLS",  formula_full)), data = data_long_completo)
+fit_cfa  <- lmer(as.formula(paste0("score_CFA",  formula_full)), data = data_long_completo)
+
+
+# 3. Comparação de Performance com o padrão que você gosta
+library(performance)
+compare_performance(fit_pca, fit_hega, fit_cfa,fit_pls, metrics = "common")
+
+
+```
+
+
+```{r}
+#library(sjPlot)
+
+# Criando uma tabela única comparando os Betas dos 5 modelos
+#tab3 <- tab_model(fit_pca, fit_hega, fit_cfa, fit_pls, 
+#                  show.ci = FALSE, show.se = TRUE, 
+#                  dv.labels = c("PCA", "hEGA", "CFA", "PLS"),
+#                  title = "Estabilidade dos Preditores em Diferentes Métodos de #Extração")
+
+#tab3
+```
+
+
+```{r}
+sessionInfo()
+```
+
